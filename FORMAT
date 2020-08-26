@@ -1,0 +1,7 @@
+a =  []
+c = int(input("kaçlısınız :"))
+z = 2020 - c
+a.append(input("adınız :"))
+a.append(input("soyadınız :"))
+a.append(z)
+print("adınız:{}soyadınız:{}13yaşındasınız:{} ".format(a[0] ,a[1],a[2]))
