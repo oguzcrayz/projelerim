@@ -1,0 +1,6 @@
+import math
+b = int(input("lft dairenin yarıçapını giriniz"))
+a = float(2) * 3.14 * float(b)
+c = math.pow((3.14 * float(b)),2)
+print("dairenin çevresi :",a)
+print("dairenin alanı :",c)
