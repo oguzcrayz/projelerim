@@ -1,0 +1,19 @@
+								
+					
+import math
+
+
+a = int(input("bir sayı girin : "))
+b = int(input("bir sayı daha girin :"))
+c = input("1 yazarsan toplama yapacak : \n 2 yazarsan çıkarma yapacak: \n 3 yazarsan çarpma yapacak : \n 4 yazarsan bölme : \n 5 yazarsa faktoryel hesaplama ama il yazdığın sayının faktöryelini hesaplar : ")
+if (c == "1" ):
+	print(a+b)
+elif (c== "2"):
+	print(a-b)
+elif (c == "3"):
+	print(a*b)
+elif (c == "5"):
+	print(math.factorial(a))
+
+else :
+	print(a/b)
