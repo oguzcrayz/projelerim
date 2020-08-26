@@ -1,0 +1,55 @@
+											PROJELERİM
+
+
+
+_____________________________________________________________________________________________________________________
+								HESAP MAKİNESİ
+								
+					
+import math
+
+
+a = int(input("bir sayı girin : "))
+b = int(input("bir sayı daha girin :"))
+c = input("1 yazarsan toplama yapacak : \n 2 yazarsan çıkarma yapacak: \n 3 yazarsan çarpma yapacak : \n 4 yazarsan bölme : \n 5 yazarsa faktoryel hesaplama ama il yazdığın sayının faktöryelini hesaplar : ")
+if (c == "1" ):
+	print(a+b)
+elif (c== "2"):
+	print(a-b)
+elif (c == "3"):
+	print(a*b)
+elif (c == "5"):
+	print(math.factorial(a))
+
+else :
+	print(a/b)
+___________________________________________
+
+							DAİRENİN ALAN VE ÇEVRE HESAPLAMASI
+
+
+import math
+b = int(input("lft dairenin yarıçapını giriniz"))
+a = float(2) * 3.14 * float(b)
+c = math.pow((3.14 * float(b)),2)
+print("dairenin çevresi :",a)
+print("dairenin alanı :",c)
+
+_____________________________________________________________________________________________________________________
+							FORMAT
+	
+
+
+
+a =  []
+c = int(input("kaçlısınız :"))
+z = 2020 - c
+a.append(input("adınız :"))
+a.append(input("soyadınız :"))
+a.append(z)
+print("adınız:{}soyadınız:{}13yaşındasınız:{} ".format(a[0] ,a[1],a[2]))
+	
+
+
+
+
