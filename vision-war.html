@@ -1,0 +1,904 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vision War - RTS Prototype</title>
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #0a0a0a;
+        }
+        #game-container {
+            border: 3px solid #333;
+            box-shadow: 0 0 20px rgba(0, 100, 0, 0.5);
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container"></div>
+
+    <script>
+// ==========================================
+// VISION WAR - RTS PROTOTYPE
+// Fog of War & Keşif Oyunu
+// ==========================================
+
+// === KONFIGÜRASYON ===
+const CONFIG = {
+    // Ekran ayarları
+    width: 1024,
+    height: 768,
+    backgroundColor: 0x1a2f1a,
+
+    // Drone ayarları
+    drone: {
+        count: 4,
+        speed: 150,
+        visionRadius: 100,
+        color: 0x4488ff,
+        selectedColor: 0xffff00,
+        size: 16,
+        startX: 512,
+        startY: 650,
+        spacing: 50
+    },
+
+    // Düşman ayarları
+    enemy: {
+        tank: {
+            color: 0xff3333,
+            size: 24
+        },
+        patrol: {
+            color: 0xff3333,
+            size: 16,
+            speed: 50,
+            minX: 400,
+            maxX: 600,
+            visionAngle: 120,
+            visionRange: 80
+        }
+    },
+
+    // Fog of War ayarları
+    fog: {
+        unexploredAlpha: 1.0,
+        exploredAlpha: 0.5,
+        visibleAlpha: 0
+    },
+
+    // Oyun ayarları
+    game: {
+        duration: 300, // 5 dakika (saniye)
+        detectionMessageDuration: 2000,
+        droneDestroyDelay: 3000
+    }
+};
+
+// === OYUN DEĞİŞKENLERİ ===
+let drones = [];
+let enemies = [];
+let selectedDrone = null;
+let fogGraphics, fogMask, exploredMask;
+let exploredAreas = [];
+let detectedEnemies = new Set();
+let gameTimer;
+let remainingTime;
+let gameOver = false;
+
+// UI elementleri
+let droneCountText, detectionCountText, timerText, messageText;
+
+// === ANA SAHNE ===
+class GameScene extends Phaser.Scene {
+    constructor() {
+        super({ key: 'GameScene' });
+    }
+
+    create() {
+        // Oyun değişkenlerini sıfırla
+        this.resetGameState();
+
+        // Harita arka planını oluştur
+        this.createBackground();
+
+        // Drone'ları oluştur
+        this.createDrones();
+
+        // Düşmanları oluştur
+        this.createEnemies();
+
+        // Fog of War sistemini oluştur
+        this.createFogOfWar();
+
+        // UI'ı oluştur
+        this.createUI();
+
+        // Input olaylarını ayarla
+        this.setupInput();
+
+        // Zamanlayıcıyı başlat
+        this.startTimer();
+    }
+
+    // Oyun durumunu sıfırla
+    resetGameState() {
+        drones = [];
+        enemies = [];
+        selectedDrone = null;
+        exploredAreas = [];
+        detectedEnemies = new Set();
+        gameOver = false;
+        remainingTime = CONFIG.game.duration;
+    }
+
+    // Arka plan çizgileri (grid efekti)
+    createBackground() {
+        const graphics = this.add.graphics();
+        graphics.lineStyle(1, 0x2a4f2a, 0.3);
+
+        // Dikey çizgiler
+        for (let x = 0; x <= CONFIG.width; x += 50) {
+            graphics.moveTo(x, 0);
+            graphics.lineTo(x, CONFIG.height);
+        }
+
+        // Yatay çizgiler
+        for (let y = 0; y <= CONFIG.height; y += 50) {
+            graphics.moveTo(0, y);
+            graphics.lineTo(CONFIG.width, y);
+        }
+
+        graphics.strokePath();
+    }
+
+    // === DRONE OLUŞTURMA ===
+    createDrone(x, y, index) {
+        const graphics = this.add.graphics();
+
+        // Mavi üçgen çiz
+        graphics.fillStyle(CONFIG.drone.color);
+        graphics.beginPath();
+        graphics.moveTo(0, -CONFIG.drone.size);
+        graphics.lineTo(-CONFIG.drone.size * 0.7, CONFIG.drone.size * 0.7);
+        graphics.lineTo(CONFIG.drone.size * 0.7, CONFIG.drone.size * 0.7);
+        graphics.closePath();
+        graphics.fillPath();
+
+        // Texture oluştur
+        graphics.generateTexture('drone_' + index, CONFIG.drone.size * 2, CONFIG.drone.size * 2);
+        graphics.destroy();
+
+        // Sprite oluştur
+        const drone = this.add.sprite(x, y, 'drone_' + index);
+        drone.setOrigin(0.5, 0.5);
+
+        // Drone özellikleri
+        drone.droneData = {
+            index: index,
+            targetX: x,
+            targetY: y,
+            isMoving: false,
+            isSelected: false,
+            isAlive: true,
+            visionRadius: CONFIG.drone.visionRadius
+        };
+
+        // Seçim highlight'ı
+        drone.highlight = this.add.circle(x, y, CONFIG.drone.size + 5);
+        drone.highlight.setStrokeStyle(2, CONFIG.drone.selectedColor);
+        drone.highlight.setVisible(false);
+
+        // Görüş alanı göstergesi (debug için - yarı saydam)
+        drone.visionCircle = this.add.circle(x, y, CONFIG.drone.visionRadius);
+        drone.visionCircle.setStrokeStyle(1, CONFIG.drone.color, 0.3);
+        drone.visionCircle.setFillStyle(CONFIG.drone.color, 0.05);
+
+        return drone;
+    }
+
+    createDrones() {
+        const startX = CONFIG.drone.startX - (CONFIG.drone.count - 1) * CONFIG.drone.spacing / 2;
+
+        for (let i = 0; i < CONFIG.drone.count; i++) {
+            const x = startX + i * CONFIG.drone.spacing;
+            const drone = this.createDrone(x, CONFIG.drone.startY, i);
+            drones.push(drone);
+        }
+    }
+
+    // === DÜŞMAN OLUŞTURMA ===
+    createEnemy(type, x, y, config = {}) {
+        let enemy;
+
+        if (type === 'tank') {
+            // Kırmızı kare (tank)
+            enemy = this.add.rectangle(x, y, CONFIG.enemy.tank.size, CONFIG.enemy.tank.size, CONFIG.enemy.tank.color);
+        } else if (type === 'patrol') {
+            // Kırmızı daire (patrol)
+            enemy = this.add.circle(x, y, CONFIG.enemy.patrol.size, CONFIG.enemy.patrol.color);
+        }
+
+        enemy.enemyData = {
+            type: type,
+            isRevealed: false,
+            isVisible: false,
+            ...config
+        };
+
+        // Patrol için görüş konisi
+        if (type === 'patrol') {
+            enemy.visionCone = this.add.graphics();
+            enemy.enemyData.direction = 1; // Başlangıç yönü (sağa)
+            enemy.enemyData.facingAngle = 0;
+        }
+
+        // Başlangıçta görünmez
+        enemy.setVisible(false);
+
+        return enemy;
+    }
+
+    createEnemies() {
+        // Tank #1
+        const tank1 = this.createEnemy('tank', 300, 200, { name: 'TANK #1' });
+        enemies.push(tank1);
+
+        // Tank #2
+        const tank2 = this.createEnemy('tank', 700, 250, { name: 'TANK #2' });
+        enemies.push(tank2);
+
+        // Patrol
+        const patrol = this.createEnemy('patrol', 500, 300, {
+            name: 'DEVRIYE',
+            minX: CONFIG.enemy.patrol.minX,
+            maxX: CONFIG.enemy.patrol.maxX,
+            speed: CONFIG.enemy.patrol.speed
+        });
+        enemies.push(patrol);
+    }
+
+    // === FOG OF WAR SİSTEMİ ===
+    createFogOfWar() {
+        // Keşfedilmiş alanları tutan render texture
+        this.exploredRT = this.add.renderTexture(0, 0, CONFIG.width, CONFIG.height);
+        this.exploredRT.setVisible(false);
+
+        // Ana fog graphics (siyah katman)
+        fogGraphics = this.add.graphics();
+        fogGraphics.setDepth(100);
+
+        // Keşfedilmiş alan göstergesi (gri katman)
+        this.exploredGraphics = this.add.graphics();
+        this.exploredGraphics.setDepth(99);
+    }
+
+    updateFogOfWar() {
+        // Fog'u temizle
+        fogGraphics.clear();
+        this.exploredGraphics.clear();
+
+        // Tam siyah arka plan
+        fogGraphics.fillStyle(0x000000, 1);
+        fogGraphics.fillRect(0, 0, CONFIG.width, CONFIG.height);
+
+        // Keşfedilmiş alanları gri yap
+        this.exploredGraphics.fillStyle(0x000000, CONFIG.fog.exploredAlpha);
+        this.exploredGraphics.fillRect(0, 0, CONFIG.width, CONFIG.height);
+
+        // Aktif drone görüş alanlarını kaydet
+        const activeVisionAreas = [];
+
+        drones.forEach(drone => {
+            if (drone.droneData.isAlive) {
+                activeVisionAreas.push({
+                    x: drone.x,
+                    y: drone.y,
+                    radius: drone.droneData.visionRadius
+                });
+
+                // Keşfedilmiş alanlara ekle
+                exploredAreas.push({
+                    x: drone.x,
+                    y: drone.y,
+                    radius: drone.droneData.visionRadius
+                });
+            }
+        });
+
+        // BlendMode ile görüş alanlarını aç
+        // Önce keşfedilmiş tüm alanları gri katmandan çıkar
+        this.exploredGraphics.fillStyle(0x000000, 0);
+        exploredAreas.forEach(area => {
+            this.exploredGraphics.fillCircle(area.x, area.y, area.radius);
+        });
+
+        // Şu an görünen alanları siyah katmandan çıkar
+        fogGraphics.fillStyle(0x1a2f1a, 1);
+        activeVisionAreas.forEach(area => {
+            fogGraphics.fillCircle(area.x, area.y, area.radius);
+        });
+
+        // Keşfedilmiş ama şu an görünmeyen alanlar için gri katman
+        const exploredOnlyGraphics = this.add.graphics();
+        exploredOnlyGraphics.setDepth(98);
+        exploredOnlyGraphics.fillStyle(0x000000, CONFIG.fog.exploredAlpha);
+
+        // Sadece keşfedilmiş (ama aktif görüşte olmayan) alanları hesapla
+        exploredAreas.forEach(area => {
+            let isInActiveVision = false;
+            activeVisionAreas.forEach(active => {
+                const dist = Phaser.Math.Distance.Between(area.x, area.y, active.x, active.y);
+                if (dist < active.radius) {
+                    isInActiveVision = true;
+                }
+            });
+        });
+
+        exploredOnlyGraphics.destroy();
+    }
+
+    // Gelişmiş Fog of War render sistemi
+    renderFogOfWar() {
+        fogGraphics.clear();
+        this.exploredGraphics.clear();
+
+        // Keşfedilmemiş alanlar için tam siyah mask oluştur
+        const maskShape = this.make.graphics();
+        maskShape.fillStyle(0xffffff);
+        maskShape.fillRect(0, 0, CONFIG.width, CONFIG.height);
+
+        // Keşfedilmiş alanları beyaz yap (görünür)
+        maskShape.fillStyle(0x000000);
+        exploredAreas.forEach(area => {
+            maskShape.fillCircle(area.x, area.y, area.radius);
+        });
+
+        // Aktif görüş alanları
+        const activeAreas = [];
+        drones.forEach(drone => {
+            if (drone.droneData.isAlive) {
+                activeAreas.push({ x: drone.x, y: drone.y, r: drone.droneData.visionRadius });
+            }
+        });
+
+        // Siyah fog (hiç keşfedilmemiş)
+        fogGraphics.fillStyle(0x000000, 1);
+        fogGraphics.fillRect(0, 0, CONFIG.width, CONFIG.height);
+
+        // Keşfedilmiş alanları fog'dan çıkar
+        const allExplored = [...new Set(exploredAreas.map(a => `${Math.round(a.x/10)},${Math.round(a.y/10)},${a.radius}`))];
+
+        // Basitleştirilmiş fog sistemi - canvas composite kullanarak
+        fogGraphics.clear();
+
+        // 1. Tam siyah arka plan
+        fogGraphics.fillStyle(0x000000, 1);
+        fogGraphics.fillRect(0, 0, CONFIG.width, CONFIG.height);
+
+        // 2. Keşfedilmiş alanları gri yap (yarı saydam siyahı kaldır)
+        exploredAreas.forEach(area => {
+            fogGraphics.fillStyle(0x000000, 0.5);
+            fogGraphics.fillCircle(area.x, area.y, area.radius);
+        });
+
+        // 3. Aktif görüş alanlarını tamamen aç
+        activeAreas.forEach(area => {
+            fogGraphics.fillStyle(0x1a2f1a, 1);
+            fogGraphics.fillCircle(area.x, area.y, area.r);
+        });
+    }
+
+    // === UI OLUŞTURMA ===
+    createUI() {
+        const textStyle = {
+            fontFamily: 'Arial, sans-serif',
+            fontSize: '18px',
+            color: '#ffffff',
+            stroke: '#000000',
+            strokeThickness: 3
+        };
+
+        const titleStyle = {
+            ...textStyle,
+            fontSize: '22px',
+            fontStyle: 'bold'
+        };
+
+        // Sol üst: Drone sayısı
+        droneCountText = this.add.text(20, 20, 'DRONE: 4/4', titleStyle);
+        droneCountText.setDepth(200);
+
+        // Orta üst: Tespit sayısı
+        detectionCountText = this.add.text(CONFIG.width / 2, 20, 'TESPİT: 0/3', titleStyle);
+        detectionCountText.setOrigin(0.5, 0);
+        detectionCountText.setDepth(200);
+
+        // Sağ üst: Zamanlayıcı
+        timerText = this.add.text(CONFIG.width - 20, 20, 'SÜRE: 05:00', titleStyle);
+        timerText.setOrigin(1, 0);
+        timerText.setDepth(200);
+
+        // Alt orta: Mesaj alanı
+        messageText = this.add.text(CONFIG.width / 2, CONFIG.height - 50, '', {
+            ...textStyle,
+            fontSize: '24px',
+            color: '#ffff00'
+        });
+        messageText.setOrigin(0.5, 0.5);
+        messageText.setDepth(200);
+
+        // Başlık
+        const title = this.add.text(CONFIG.width / 2, 60, '🎯 VISION WAR 🎯', {
+            fontFamily: 'Arial Black, sans-serif',
+            fontSize: '28px',
+            color: '#00ff00',
+            stroke: '#003300',
+            strokeThickness: 4
+        });
+        title.setOrigin(0.5, 0.5);
+        title.setDepth(200);
+        title.setAlpha(0.7);
+
+        // Kontrol bilgisi
+        const controls = this.add.text(CONFIG.width / 2, CONFIG.height - 20,
+            'Sol Tık: Seç | Sağ Tık: Hareket Et', {
+            ...textStyle,
+            fontSize: '14px',
+            color: '#aaaaaa'
+        });
+        controls.setOrigin(0.5, 0.5);
+        controls.setDepth(200);
+    }
+
+    updateUI() {
+        // Kalan drone sayısı
+        const aliveDrones = drones.filter(d => d.droneData.isAlive).length;
+        droneCountText.setText(`DRONE: ${aliveDrones}/${CONFIG.drone.count}`);
+
+        // Tespit sayısı
+        detectionCountText.setText(`TESPİT: ${detectedEnemies.size}/3`);
+
+        // Zamanlayıcı
+        const minutes = Math.floor(remainingTime / 60);
+        const seconds = remainingTime % 60;
+        timerText.setText(`SÜRE: ${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`);
+
+        // Renk değişimi (az süre kaldığında)
+        if (remainingTime <= 30) {
+            timerText.setColor('#ff3333');
+        } else if (remainingTime <= 60) {
+            timerText.setColor('#ffaa00');
+        }
+    }
+
+    showMessage(text, duration = CONFIG.game.detectionMessageDuration) {
+        messageText.setText(text);
+        messageText.setAlpha(1);
+
+        this.tweens.add({
+            targets: messageText,
+            alpha: 0,
+            duration: duration,
+            ease: 'Power2'
+        });
+    }
+
+    // === INPUT YÖNETİMİ ===
+    setupInput() {
+        // Sol tık: Drone seçimi
+        this.input.on('pointerdown', (pointer) => {
+            if (gameOver) return;
+
+            if (pointer.leftButtonDown()) {
+                this.handleLeftClick(pointer);
+            } else if (pointer.rightButtonDown()) {
+                this.handleRightClick(pointer);
+            }
+        });
+
+        // Sağ tık context menu'yü engelle
+        this.input.mouse.disableContextMenu();
+    }
+
+    handleLeftClick(pointer) {
+        let clickedDrone = null;
+
+        // Tıklanan drone'u bul
+        drones.forEach(drone => {
+            if (!drone.droneData.isAlive) return;
+
+            const dist = Phaser.Math.Distance.Between(pointer.x, pointer.y, drone.x, drone.y);
+            if (dist < CONFIG.drone.size + 10) {
+                clickedDrone = drone;
+            }
+        });
+
+        // Önceki seçimi kaldır
+        if (selectedDrone) {
+            selectedDrone.highlight.setVisible(false);
+            selectedDrone.droneData.isSelected = false;
+        }
+
+        // Yeni seçim
+        if (clickedDrone) {
+            selectedDrone = clickedDrone;
+            selectedDrone.highlight.setVisible(true);
+            selectedDrone.droneData.isSelected = true;
+        } else {
+            selectedDrone = null;
+        }
+    }
+
+    handleRightClick(pointer) {
+        if (!selectedDrone || !selectedDrone.droneData.isAlive) return;
+
+        // Hedef noktayı ayarla
+        selectedDrone.droneData.targetX = pointer.x;
+        selectedDrone.droneData.targetY = pointer.y;
+        selectedDrone.droneData.isMoving = true;
+
+        // Hareket göstergesi efekti
+        const marker = this.add.circle(pointer.x, pointer.y, 10, 0x00ff00, 0.5);
+        this.tweens.add({
+            targets: marker,
+            scale: 2,
+            alpha: 0,
+            duration: 500,
+            onComplete: () => marker.destroy()
+        });
+    }
+
+    // === ZAMANLAYICI ===
+    startTimer() {
+        gameTimer = this.time.addEvent({
+            delay: 1000,
+            callback: () => {
+                if (gameOver) return;
+
+                remainingTime--;
+                this.updateUI();
+
+                if (remainingTime <= 0) {
+                    this.endGame(false, 'SÜRE DOLDU!');
+                }
+            },
+            loop: true
+        });
+    }
+
+    // === OYUN DÖNGÜSÜ ===
+    update(time, delta) {
+        if (gameOver) return;
+
+        // Drone hareketlerini güncelle
+        this.updateDrones(delta);
+
+        // Düşman hareketlerini güncelle
+        this.updateEnemies(delta);
+
+        // Görüş kontrolü
+        this.checkVisibility();
+
+        // Fog of War güncelle
+        this.renderFogOfWar();
+
+        // Patrol görüş konisi çiz
+        this.drawPatrolVisionCone();
+
+        // Tespit kontrolü
+        this.checkPatrolDetection();
+
+        // UI güncelle
+        this.updateUI();
+
+        // Kazanma kontrolü
+        this.checkWinCondition();
+    }
+
+    updateDrones(delta) {
+        const speed = CONFIG.drone.speed * (delta / 1000);
+
+        drones.forEach(drone => {
+            if (!drone.droneData.isAlive || !drone.droneData.isMoving) return;
+
+            const dx = drone.droneData.targetX - drone.x;
+            const dy = drone.droneData.targetY - drone.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+
+            if (dist < 5) {
+                drone.droneData.isMoving = false;
+                return;
+            }
+
+            // Normalize ve hareket
+            const moveX = (dx / dist) * speed;
+            const moveY = (dy / dist) * speed;
+
+            drone.x += moveX;
+            drone.y += moveY;
+
+            // Highlight ve görüş alanını güncelle
+            drone.highlight.x = drone.x;
+            drone.highlight.y = drone.y;
+            drone.visionCircle.x = drone.x;
+            drone.visionCircle.y = drone.y;
+
+            // Rotasyonu hedefe çevir
+            drone.rotation = Math.atan2(dy, dx) + Math.PI / 2;
+        });
+    }
+
+    updateEnemies(delta) {
+        const patrol = enemies.find(e => e.enemyData.type === 'patrol');
+        if (!patrol) return;
+
+        const speed = patrol.enemyData.speed * (delta / 1000);
+
+        // Yatay hareket
+        patrol.x += speed * patrol.enemyData.direction;
+
+        // Sınır kontrolü
+        if (patrol.x >= patrol.enemyData.maxX) {
+            patrol.x = patrol.enemyData.maxX;
+            patrol.enemyData.direction = -1;
+            patrol.enemyData.facingAngle = 180;
+        } else if (patrol.x <= patrol.enemyData.minX) {
+            patrol.x = patrol.enemyData.minX;
+            patrol.enemyData.direction = 1;
+            patrol.enemyData.facingAngle = 0;
+        }
+    }
+
+    drawPatrolVisionCone() {
+        const patrol = enemies.find(e => e.enemyData.type === 'patrol');
+        if (!patrol || !patrol.visionCone) return;
+
+        patrol.visionCone.clear();
+
+        // Sadece patrol görünürse koniyi çiz
+        if (!patrol.enemyData.isVisible && !patrol.enemyData.isRevealed) return;
+
+        const angle = patrol.enemyData.facingAngle;
+        const halfAngle = CONFIG.enemy.patrol.visionAngle / 2;
+        const range = CONFIG.enemy.patrol.visionRange;
+
+        // Görüş konisi çiz
+        patrol.visionCone.fillStyle(0xff0000, 0.3);
+        patrol.visionCone.beginPath();
+        patrol.visionCone.moveTo(patrol.x, patrol.y);
+
+        // Koni açısını hesapla
+        const startAngle = Phaser.Math.DegToRad(angle - halfAngle);
+        const endAngle = Phaser.Math.DegToRad(angle + halfAngle);
+
+        // Arc çiz
+        const segments = 20;
+        for (let i = 0; i <= segments; i++) {
+            const a = startAngle + (endAngle - startAngle) * (i / segments);
+            const x = patrol.x + Math.cos(a) * range;
+            const y = patrol.y + Math.sin(a) * range;
+            patrol.visionCone.lineTo(x, y);
+        }
+
+        patrol.visionCone.closePath();
+        patrol.visionCone.fillPath();
+        patrol.visionCone.setDepth(50);
+    }
+
+    checkVisibility() {
+        enemies.forEach(enemy => {
+            let isCurrentlyVisible = false;
+
+            // Her drone'un görüş alanını kontrol et
+            drones.forEach(drone => {
+                if (!drone.droneData.isAlive) return;
+
+                const dist = Phaser.Math.Distance.Between(drone.x, drone.y, enemy.x, enemy.y);
+                if (dist <= drone.droneData.visionRadius) {
+                    isCurrentlyVisible = true;
+
+                    // İlk tespit
+                    if (!enemy.enemyData.isRevealed) {
+                        enemy.enemyData.isRevealed = true;
+                        detectedEnemies.add(enemy);
+                        this.showMessage(`⚠️ HEDEF TESPİT EDİLDİ: ${enemy.enemyData.name} ⚠️`);
+                    }
+                }
+            });
+
+            enemy.enemyData.isVisible = isCurrentlyVisible;
+
+            // Görünürlük durumu
+            if (isCurrentlyVisible || enemy.enemyData.isRevealed) {
+                enemy.setVisible(true);
+                // Görünür değilse ama tespit edilmişse yarı saydam göster
+                if (!isCurrentlyVisible && enemy.enemyData.isRevealed) {
+                    enemy.setAlpha(0.5);
+                } else {
+                    enemy.setAlpha(1);
+                }
+            }
+        });
+    }
+
+    checkPatrolDetection() {
+        const patrol = enemies.find(e => e.enemyData.type === 'patrol');
+        if (!patrol) return;
+
+        const angle = patrol.enemyData.facingAngle;
+        const halfAngle = CONFIG.enemy.patrol.visionAngle / 2;
+        const range = CONFIG.enemy.patrol.visionRange;
+
+        drones.forEach(drone => {
+            if (!drone.droneData.isAlive) return;
+
+            // Mesafe kontrolü
+            const dist = Phaser.Math.Distance.Between(patrol.x, patrol.y, drone.x, drone.y);
+            if (dist > range) return;
+
+            // Açı kontrolü
+            const angleToDrone = Phaser.Math.RadToDeg(Math.atan2(drone.y - patrol.y, drone.x - patrol.x));
+            let angleDiff = angleToDrone - angle;
+
+            // Açı farkını normalize et
+            while (angleDiff > 180) angleDiff -= 360;
+            while (angleDiff < -180) angleDiff += 360;
+
+            if (Math.abs(angleDiff) <= halfAngle) {
+                // Tespit edildi!
+                this.droneDetected(drone);
+            }
+        });
+    }
+
+    droneDetected(drone) {
+        if (!drone.droneData.isAlive) return;
+
+        // Mesaj göster
+        this.showMessage('🚨 TESPİT EDİLDİN! 🚨', CONFIG.game.droneDestroyDelay);
+
+        // Drone'u kırmızı yap
+        drone.setTint(0xff0000);
+
+        // 3 saniye sonra yok et
+        this.time.delayedCall(CONFIG.game.droneDestroyDelay, () => {
+            this.destroyDrone(drone);
+        });
+
+        // Geçici olarak hareket etmesini engelle
+        drone.droneData.isAlive = false;
+    }
+
+    destroyDrone(drone) {
+        // Patlama efekti
+        const explosion = this.add.circle(drone.x, drone.y, 5, 0xff6600);
+        this.tweens.add({
+            targets: explosion,
+            scale: 4,
+            alpha: 0,
+            duration: 500,
+            onComplete: () => explosion.destroy()
+        });
+
+        // Drone'u gizle
+        drone.setVisible(false);
+        drone.highlight.setVisible(false);
+        drone.visionCircle.setVisible(false);
+
+        // Seçili drone ise seçimi kaldır
+        if (selectedDrone === drone) {
+            selectedDrone = null;
+        }
+
+        // Tüm drone'lar öldü mü kontrol et
+        const aliveDrones = drones.filter(d => d.droneData.isAlive && d.visible !== false);
+        if (aliveDrones.length === 0) {
+            this.endGame(false, 'TÜM DRONE\'LAR YOK EDİLDİ!');
+        }
+    }
+
+    checkWinCondition() {
+        if (detectedEnemies.size >= 3) {
+            this.endGame(true, 'TÜM HEDEFLER TESPİT EDİLDİ!');
+        }
+    }
+
+    endGame(won, reason) {
+        gameOver = true;
+
+        // Zamanlayıcıyı durdur
+        if (gameTimer) gameTimer.remove();
+
+        // Karartma efekti
+        const overlay = this.add.rectangle(CONFIG.width / 2, CONFIG.height / 2, CONFIG.width, CONFIG.height, 0x000000, 0.8);
+        overlay.setDepth(300);
+
+        // Sonuç metni
+        const resultStyle = {
+            fontFamily: 'Arial Black, sans-serif',
+            fontSize: '48px',
+            color: won ? '#00ff00' : '#ff0000',
+            stroke: '#000000',
+            strokeThickness: 6,
+            align: 'center'
+        };
+
+        const title = won ? '🏆 MİSYON TAMAMLANDI 🏆' : '💀 MİSYON BAŞARISIZ 💀';
+        const resultText = this.add.text(CONFIG.width / 2, CONFIG.height / 2 - 50, title, resultStyle);
+        resultText.setOrigin(0.5);
+        resultText.setDepth(301);
+
+        // Sebep metni
+        const reasonText = this.add.text(CONFIG.width / 2, CONFIG.height / 2 + 30, reason, {
+            fontFamily: 'Arial, sans-serif',
+            fontSize: '24px',
+            color: '#ffffff',
+            stroke: '#000000',
+            strokeThickness: 3
+        });
+        reasonText.setOrigin(0.5);
+        reasonText.setDepth(301);
+
+        // İstatistikler
+        const stats = `Tespit Edilen Düşman: ${detectedEnemies.size}/3\nKalan Drone: ${drones.filter(d => d.droneData.isAlive).length}/${CONFIG.drone.count}`;
+        const statsText = this.add.text(CONFIG.width / 2, CONFIG.height / 2 + 100, stats, {
+            fontFamily: 'Arial, sans-serif',
+            fontSize: '20px',
+            color: '#aaaaaa',
+            stroke: '#000000',
+            strokeThickness: 2,
+            align: 'center'
+        });
+        statsText.setOrigin(0.5);
+        statsText.setDepth(301);
+
+        // Yeniden başlat butonu
+        const restartText = this.add.text(CONFIG.width / 2, CONFIG.height / 2 + 180, '[ TIKLA - YENİDEN BAŞLA ]', {
+            fontFamily: 'Arial, sans-serif',
+            fontSize: '22px',
+            color: '#ffff00',
+            stroke: '#000000',
+            strokeThickness: 3
+        });
+        restartText.setOrigin(0.5);
+        restartText.setDepth(301);
+        restartText.setInteractive({ useHandCursor: true });
+
+        restartText.on('pointerover', () => restartText.setScale(1.1));
+        restartText.on('pointerout', () => restartText.setScale(1));
+        restartText.on('pointerdown', () => this.scene.restart());
+    }
+}
+
+// === PHASER OYUN KONFIGÜRASYONU ===
+const gameConfig = {
+    type: Phaser.AUTO,
+    width: CONFIG.width,
+    height: CONFIG.height,
+    parent: 'game-container',
+    backgroundColor: CONFIG.backgroundColor,
+    scene: GameScene,
+    physics: {
+        default: 'arcade',
+        arcade: {
+            debug: false
+        }
+    }
+};
+
+// Oyunu başlat
+const game = new Phaser.Game(gameConfig);
+    </script>
+</body>
+</html>
