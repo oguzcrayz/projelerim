@@ -30,7 +30,7 @@
     <script>
 // ==========================================
 // VISION WAR - RTS PROTOTYPE
-// Fog of War & Keşif Oyunu + EW + Triangülasyon
+// Fog of War + EW + Triangülasyon + Counter-Vision
 // ==========================================
 
 // === KONFIGÜRASYON ===
@@ -76,25 +76,42 @@ const CONFIG = {
         y: 150,
         radius: 150,
         color: 0xffcc00,
-        activationTime: 60, // 60 saniye sonra aktif
+        activationTime: 60,
         size: 20,
-        jammingTransitionTime: 2000, // 2 saniye görüş geçişi
-        commandDelay: 500 // 0.5 saniye komut gecikmesi
+        jammingTransitionTime: 2000,
+        commandDelay: 500
     },
 
     // RF / Triangülasyon ayarları
     rf: {
         x: 500,
-        y: 180, // Gizli RF kaynağı (EW'nin gerçek konumu)
-        detectionZoneY: 400, // Bu Y'nin üstünde sinyal tespit edilir
-        signalLineLength: 200, // Sinyal çizgisi uzunluğu
-        localizationThreshold: 50 // Lokalizasyon başarı eşiği (px)
+        y: 180,
+        detectionZoneY: 400,
+        signalLineLength: 200,
+        localizationThreshold: 50
     },
 
     // Topçu atışı ayarları
     artillery: {
-        countdownDuration: 3000, // 3 saniye geri sayım
+        countdownDuration: 3000,
         explosionRadius: 80
+    },
+
+    // Counter-Vision ayarları
+    counterVision: {
+        startY: 100,
+        endY: 600,
+        speed: 30, // px/saniye
+        activationAfterEWDestroyed: 10, // EW yok edildikten 10sn sonra
+        activationTime: 120, // Veya oyun başladıktan 120sn sonra
+        artilleryCountdown: 30 // Tarama tamamlandıktan sonra 30sn
+    },
+
+    // Decoy ayarları
+    decoy: {
+        duration: 60, // 60 saniye aktif
+        delayTime: 20, // Düşmanı 20 saniye oyalar
+        color: 0x00ff00
     },
 
     // Fog of War ayarları
@@ -106,7 +123,7 @@ const CONFIG = {
 
     // Oyun ayarları
     game: {
-        duration: 300, // 5 dakika (saniye)
+        duration: 300,
         detectionMessageDuration: 2000,
         droneDestroyDelay: 3000
     }
@@ -127,6 +144,7 @@ let gameOver = false;
 let ewSource = null;
 let ewActive = false;
 let ewDestroyed = false;
+let ewDestroyedTime = 0;
 let ewAreaGraphics = null;
 let ewStatusText = null;
 let ewBorderGraphics = null;
@@ -142,6 +160,28 @@ let artilleryReady = false;
 let artilleryFiring = false;
 let artilleryText = null;
 
+// Counter-Vision değişkenleri
+let counterVisionActive = false;
+let counterVisionY = CONFIG.counterVision.startY;
+let counterVisionGraphics = null;
+let counterVisionPaused = false;
+let counterVisionPauseTime = 0;
+let counterVisionReachedEnd = false;
+let enemyArtilleryCountdown = 0;
+let counterVisionStatusText = null;
+let counterVisionWarningText = null;
+let detectedDrones = new Set();
+
+// Decoy değişkenleri
+let decoyCount = 1;
+let decoyMode = false;
+let decoyPlaced = null;
+let decoyActive = false;
+let decoyTimer = 0;
+let decoyGraphics = null;
+let decoyText = null;
+let decoyPreview = null;
+
 // UI elementleri
 let droneCountText, detectionCountText, timerText, messageText;
 
@@ -152,44 +192,22 @@ class GameScene extends Phaser.Scene {
     }
 
     create() {
-        // Oyun değişkenlerini sıfırla
         this.resetGameState();
-
-        // Harita arka planını oluştur
         this.createBackground();
-
-        // Drone'ları oluştur
         this.createDrones();
-
-        // Düşmanları oluştur
         this.createEnemies();
-
-        // EW kaynağını oluştur
         this.createEWSource();
-
-        // RF sinyal graphics
         this.createRFSignalSystem();
-
-        // Fog of War sistemini oluştur
+        this.createCounterVisionSystem();
+        this.createDecoySystem();
         this.createFogOfWar();
-
-        // EW kenar efekti için graphics
         this.createEWBorderEffect();
-
-        // UI'ı oluştur
         this.createUI();
-
-        // Input olaylarını ayarla
         this.setupInput();
-
-        // Zamanlayıcıyı başlat
         this.startTimer();
-
-        // EW aktivasyon zamanlayıcısı
         this.scheduleEWActivation();
     }
 
-    // Oyun durumunu sıfırla
     resetGameState() {
         drones = [];
         enemies = [];
@@ -200,6 +218,7 @@ class GameScene extends Phaser.Scene {
         remainingTime = CONFIG.game.duration;
         ewActive = false;
         ewDestroyed = false;
+        ewDestroyedTime = 0;
         ewSource = null;
         ewAreaGraphics = null;
         ewStatusText = null;
@@ -213,20 +232,35 @@ class GameScene extends Phaser.Scene {
         artilleryReady = false;
         artilleryFiring = false;
         artilleryText = null;
+        counterVisionActive = false;
+        counterVisionY = CONFIG.counterVision.startY;
+        counterVisionGraphics = null;
+        counterVisionPaused = false;
+        counterVisionPauseTime = 0;
+        counterVisionReachedEnd = false;
+        enemyArtilleryCountdown = 0;
+        counterVisionStatusText = null;
+        counterVisionWarningText = null;
+        detectedDrones = new Set();
+        decoyCount = 1;
+        decoyMode = false;
+        decoyPlaced = null;
+        decoyActive = false;
+        decoyTimer = 0;
+        decoyGraphics = null;
+        decoyText = null;
+        decoyPreview = null;
     }
 
-    // Arka plan çizgileri (grid efekti)
     createBackground() {
         const graphics = this.add.graphics();
         graphics.lineStyle(1, 0x2a4f2a, 0.3);
 
-        // Dikey çizgiler
         for (let x = 0; x <= CONFIG.width; x += 50) {
             graphics.moveTo(x, 0);
             graphics.lineTo(x, CONFIG.height);
         }
 
-        // Yatay çizgiler
         for (let y = 0; y <= CONFIG.height; y += 50) {
             graphics.moveTo(0, y);
             graphics.lineTo(CONFIG.width, y);
@@ -234,13 +268,12 @@ class GameScene extends Phaser.Scene {
 
         graphics.strokePath();
 
-        // RF tespit bölgesi çizgisi (y = 400)
+        // RF tespit bölgesi çizgisi
         graphics.lineStyle(2, 0x00ff00, 0.2);
         graphics.moveTo(0, CONFIG.rf.detectionZoneY);
         graphics.lineTo(CONFIG.width, CONFIG.rf.detectionZoneY);
         graphics.strokePath();
 
-        // RF bölgesi etiketi
         const rfZoneLabel = this.add.text(10, CONFIG.rf.detectionZoneY - 25, '▲ RF TESPİT BÖLGESİ', {
             fontFamily: 'Arial',
             fontSize: '12px',
@@ -250,49 +283,301 @@ class GameScene extends Phaser.Scene {
         rfZoneLabel.setAlpha(0.4);
     }
 
+    // === COUNTER-VISION SİSTEMİ ===
+    createCounterVisionSystem() {
+        counterVisionGraphics = this.add.graphics();
+        counterVisionGraphics.setDepth(90);
+    }
+
+    checkCounterVisionActivation() {
+        if (counterVisionActive || gameOver) return;
+
+        const elapsedTime = CONFIG.game.duration - remainingTime;
+
+        // EW yok edildikten 10sn sonra VEYA oyun başladıktan 120sn sonra
+        const shouldActivate =
+            (ewDestroyed && (this.time.now - ewDestroyedTime) >= CONFIG.counterVision.activationAfterEWDestroyed * 1000) ||
+            (elapsedTime >= CONFIG.counterVision.activationTime);
+
+        if (shouldActivate) {
+            this.activateCounterVision();
+        }
+    }
+
+    activateCounterVision() {
+        counterVisionActive = true;
+        counterVisionY = CONFIG.counterVision.startY;
+
+        this.showMessage('⚠️ DÜŞMAN KEŞİF TARAMASI BAŞLADI!', 3000);
+
+        // UI güncelle
+        if (counterVisionWarningText) {
+            counterVisionWarningText.setVisible(true);
+        }
+    }
+
+    updateCounterVision(delta) {
+        if (!counterVisionActive || gameOver) return;
+
+        // Decoy tarafından duraklatıldı mı?
+        if (counterVisionPaused) {
+            counterVisionPauseTime -= delta;
+            if (counterVisionPauseTime <= 0) {
+                counterVisionPaused = false;
+                this.showMessage('🔄 Düşman taraması devam ediyor!', 2000);
+
+                // Decoy'u patlat
+                if (decoyPlaced) {
+                    this.destroyDecoy();
+                }
+            }
+            return;
+        }
+
+        // Tarama çizgisini hareket ettir
+        counterVisionY += CONFIG.counterVision.speed * (delta / 1000);
+
+        // Drone tespiti
+        drones.forEach(drone => {
+            if (!drone.droneData.isAlive) return;
+            if (detectedDrones.has(drone.droneData.index)) return;
+
+            // Çizgi drone'a değdi mi?
+            if (Math.abs(drone.y - counterVisionY) < 10) {
+                detectedDrones.add(drone.droneData.index);
+                this.showMessage(`⚠️ DRONE #${drone.droneData.index + 1} TESPİT EDİLDİ!`, 2000);
+                drone.setTint(0xff6666);
+            }
+        });
+
+        // Decoy kontrolü
+        if (decoyPlaced && decoyActive && !counterVisionPaused) {
+            if (Math.abs(decoyPlaced.y - counterVisionY) < 10) {
+                this.onDecoyDetected();
+            }
+        }
+
+        // Bitiş kontrolü
+        if (counterVisionY >= CONFIG.counterVision.endY && !counterVisionReachedEnd) {
+            counterVisionReachedEnd = true;
+            this.onCounterVisionComplete();
+        }
+    }
+
+    onCounterVisionComplete() {
+        this.showMessage('💀 KONUMUNUZ TESPİT EDİLDİ! Topçu atışı geliyor!', 3000);
+        enemyArtilleryCountdown = CONFIG.counterVision.artilleryCountdown;
+
+        // Geri sayım başlat
+        this.time.addEvent({
+            delay: 1000,
+            callback: () => {
+                if (gameOver) return;
+
+                enemyArtilleryCountdown--;
+
+                if (enemyArtilleryCountdown <= 0) {
+                    this.endGame(false, 'TOPÇU ATIŞI ALDINIZ!');
+                }
+            },
+            repeat: CONFIG.counterVision.artilleryCountdown - 1
+        });
+    }
+
+    drawCounterVision() {
+        counterVisionGraphics.clear();
+
+        if (!counterVisionActive || gameOver) return;
+
+        // Taranmış alan (kırmızı tint)
+        counterVisionGraphics.fillStyle(0xff0000, 0.1);
+        counterVisionGraphics.fillRect(0, CONFIG.counterVision.startY, CONFIG.width, counterVisionY - CONFIG.counterVision.startY);
+
+        // Tarama çizgisi
+        counterVisionGraphics.lineStyle(3, 0xff0000, 0.8);
+        counterVisionGraphics.beginPath();
+        counterVisionGraphics.moveTo(0, counterVisionY);
+        counterVisionGraphics.lineTo(CONFIG.width, counterVisionY);
+        counterVisionGraphics.strokePath();
+
+        // Animasyonlu efekt
+        const pulse = Math.sin(this.time.now / 200) * 0.3 + 0.7;
+        counterVisionGraphics.lineStyle(5, 0xff0000, pulse * 0.3);
+        counterVisionGraphics.beginPath();
+        counterVisionGraphics.moveTo(0, counterVisionY);
+        counterVisionGraphics.lineTo(CONFIG.width, counterVisionY);
+        counterVisionGraphics.strokePath();
+
+        // Duraklatma göstergesi
+        if (counterVisionPaused) {
+            counterVisionGraphics.fillStyle(0xffff00, 0.3);
+            counterVisionGraphics.fillCircle(decoyPlaced ? decoyPlaced.x : CONFIG.width / 2, counterVisionY, 30);
+        }
+    }
+
+    // === DECOY SİSTEMİ ===
+    createDecoySystem() {
+        decoyGraphics = this.add.graphics();
+        decoyGraphics.setDepth(85);
+
+        // Decoy önizleme (fare takip)
+        decoyPreview = this.add.circle(0, 0, 15, CONFIG.decoy.color, 0.3);
+        decoyPreview.setStrokeStyle(2, CONFIG.decoy.color, 0.5);
+        decoyPreview.setVisible(false);
+        decoyPreview.setDepth(200);
+    }
+
+    toggleDecoyMode() {
+        if (decoyCount <= 0 || decoyPlaced) {
+            this.showMessage('❌ Decoy kullanılamaz!', 1000);
+            return;
+        }
+
+        decoyMode = !decoyMode;
+        decoyPreview.setVisible(decoyMode);
+
+        if (decoyMode) {
+            this.showMessage('📡 Decoy modu aktif - Sol tık ile yerleştir', 2000);
+        }
+    }
+
+    updateDecoyPreview(pointer) {
+        if (decoyMode && decoyPreview) {
+            decoyPreview.x = pointer.x;
+            decoyPreview.y = pointer.y;
+        }
+    }
+
+    placeDecoy(x, y) {
+        if (decoyCount <= 0 || decoyPlaced) return;
+
+        decoyCount--;
+        decoyMode = false;
+        decoyPreview.setVisible(false);
+
+        // Decoy oluştur
+        decoyPlaced = {
+            x: x,
+            y: y,
+            graphics: this.add.graphics(),
+            pulseCircle: this.add.circle(x, y, 10, CONFIG.decoy.color, 0.5)
+        };
+
+        decoyPlaced.graphics.setDepth(86);
+        decoyPlaced.pulseCircle.setDepth(85);
+
+        // Pulse animasyonu
+        this.tweens.add({
+            targets: decoyPlaced.pulseCircle,
+            scale: { from: 1, to: 3 },
+            alpha: { from: 0.5, to: 0 },
+            duration: 1500,
+            repeat: -1
+        });
+
+        decoyActive = true;
+        decoyTimer = CONFIG.decoy.duration;
+
+        this.showMessage('📡 DECOY YERLEŞTİRİLDİ!', 2000);
+
+        // Decoy süresi
+        this.time.addEvent({
+            delay: 1000,
+            callback: () => {
+                if (!decoyActive) return;
+                decoyTimer--;
+                if (decoyTimer <= 0) {
+                    this.destroyDecoy();
+                }
+            },
+            repeat: CONFIG.decoy.duration - 1
+        });
+    }
+
+    onDecoyDetected() {
+        if (!decoyActive || counterVisionPaused) return;
+
+        counterVisionPaused = true;
+        counterVisionPauseTime = CONFIG.decoy.delayTime * 1000;
+
+        this.showMessage('🎯 DÜŞMAN YANILDI! Sahte hedefi tarıyor...', 3000);
+    }
+
+    destroyDecoy() {
+        if (!decoyPlaced) return;
+
+        // Patlama efekti
+        const explosion = this.add.circle(decoyPlaced.x, decoyPlaced.y, 10, 0x00ff00, 1);
+        this.tweens.add({
+            targets: explosion,
+            scale: 5,
+            alpha: 0,
+            duration: 500,
+            onComplete: () => explosion.destroy()
+        });
+
+        // Temizle
+        if (decoyPlaced.graphics) decoyPlaced.graphics.destroy();
+        if (decoyPlaced.pulseCircle) decoyPlaced.pulseCircle.destroy();
+
+        decoyPlaced = null;
+        decoyActive = false;
+
+        this.showMessage('💥 Decoy yok edildi!', 2000);
+    }
+
+    drawDecoy() {
+        if (!decoyPlaced || !decoyActive) return;
+
+        decoyGraphics.clear();
+
+        // Ana nokta
+        decoyGraphics.fillStyle(CONFIG.decoy.color, 0.8);
+        decoyGraphics.fillCircle(decoyPlaced.x, decoyPlaced.y, 8);
+
+        // RF dalga efekti
+        const time = this.time.now;
+        for (let i = 0; i < 3; i++) {
+            const radius = ((time / 1000 + i * 0.33) % 1) * 50;
+            const alpha = 0.5 * (1 - radius / 50);
+            decoyGraphics.lineStyle(2, 0x4488ff, alpha);
+            decoyGraphics.strokeCircle(decoyPlaced.x, decoyPlaced.y, radius);
+        }
+    }
+
     // === RF SİNYAL SİSTEMİ ===
     createRFSignalSystem() {
         rfSignalGraphics = this.add.graphics();
         rfSignalGraphics.setDepth(95);
     }
 
-    // RF sinyallerini çiz ve triangülasyon yap
     updateRFSignals() {
         rfSignalGraphics.clear();
 
-        if (ewDestroyed) return; // EW yok edildiyse sinyal yok
+        if (ewDestroyed) return;
 
-        // Sinyal tespit eden drone'ları bul
         const detectingDrones = drones.filter(drone =>
             drone.droneData.isAlive && drone.y < CONFIG.rf.detectionZoneY
         );
 
-        // Her tespit eden drone için sinyal çizgisi çiz
         detectingDrones.forEach(drone => {
-            // RF kaynağına olan açıyı hesapla
             const angle = Math.atan2(CONFIG.rf.y - drone.y, CONFIG.rf.x - drone.x);
-
-            // Kesikli çizgi için başlangıç ve bitiş noktaları
             const startX = drone.x;
             const startY = drone.y;
             const endX = drone.x + Math.cos(angle) * CONFIG.rf.signalLineLength;
             const endY = drone.y + Math.sin(angle) * CONFIG.rf.signalLineLength;
 
-            // Kesikli yeşil çizgi çiz
             this.drawDashedLine(rfSignalGraphics, startX, startY, endX, endY, 0x00ff00, 0.8, 10, 5);
 
-            // Sinyal göstergesi (drone üzerinde)
             rfSignalGraphics.fillStyle(0x00ff00, 0.5);
             rfSignalGraphics.fillCircle(drone.x, drone.y - 25, 5);
         });
 
-        // Triangülasyon: 2+ drone varsa kesişim noktasını hesapla
         if (detectingDrones.length >= 2 && !rfLocalized) {
             this.calculateTriangulation(detectingDrones);
         }
     }
 
-    // Kesikli çizgi çizme fonksiyonu
     drawDashedLine(graphics, x1, y1, x2, y2, color, alpha, dashLength, gapLength) {
         const dx = x2 - x1;
         const dy = y2 - y1;
@@ -317,19 +602,12 @@ class GameScene extends Phaser.Scene {
         }
     }
 
-    // Triangülasyon hesaplama
     calculateTriangulation(detectingDrones) {
-        // İlk iki drone'u al
         const drone1 = detectingDrones[0];
         const drone2 = detectingDrones[1];
 
-        // Her drone'dan RF kaynağına olan açıları hesapla
         const angle1 = Math.atan2(CONFIG.rf.y - drone1.y, CONFIG.rf.x - drone1.x);
         const angle2 = Math.atan2(CONFIG.rf.y - drone2.y, CONFIG.rf.x - drone2.x);
-
-        // Çizgilerin kesişim noktasını hesapla
-        // Çizgi 1: drone1'den angle1 yönünde
-        // Çizgi 2: drone2'den angle2 yönünde
 
         const intersection = this.lineIntersection(
             drone1.x, drone1.y, angle1,
@@ -337,34 +615,27 @@ class GameScene extends Phaser.Scene {
         );
 
         if (intersection) {
-            // Kesişim noktasını kontrol et
             const distanceToReal = Phaser.Math.Distance.Between(
                 intersection.x, intersection.y,
                 CONFIG.rf.x, CONFIG.rf.y
             );
 
-            // Lokalizasyon başarılı mı?
             if (distanceToReal <= CONFIG.rf.localizationThreshold) {
                 this.onLocalizationSuccess(intersection);
             } else {
-                // Yaklaşık konum göster
                 this.showApproximateLocation(intersection);
             }
         }
     }
 
-    // İki çizginin kesişim noktası
     lineIntersection(x1, y1, angle1, x2, y2, angle2) {
-        // Parametrik form: P = P0 + t * D
         const d1x = Math.cos(angle1);
         const d1y = Math.sin(angle1);
         const d2x = Math.cos(angle2);
         const d2y = Math.sin(angle2);
 
-        // Çapraz çarpım
         const cross = d1x * d2y - d1y * d2x;
 
-        // Paralel çizgiler
         if (Math.abs(cross) < 0.0001) return null;
 
         const dx = x2 - x1;
@@ -372,46 +643,34 @@ class GameScene extends Phaser.Scene {
 
         const t = (dx * d2y - dy * d2x) / cross;
 
-        // Kesişim noktası
         return {
             x: x1 + t * d1x,
             y: y1 + t * d1y
         };
     }
 
-    // Lokalizasyon başarılı
     onLocalizationSuccess(point) {
         rfLocalized = true;
         localizedPoint = point;
         artilleryReady = true;
 
-        // Başarı mesajı
         this.showMessage('📡 SİNYAL KAYNAĞI LOKALİZE EDİLDİ!', 3000);
-
-        // Lokalize edilen noktada marker oluştur
         this.createLocalizedMarker(point);
-
-        // UI güncelle
         this.updateRFStatusUI();
     }
 
-    // Yaklaşık konum göster
     showApproximateLocation(point) {
-        // Yaklaşık konum için yarı saydam daire
         rfSignalGraphics.fillStyle(0x00ff00, 0.2);
         rfSignalGraphics.fillCircle(point.x, point.y, 30);
         rfSignalGraphics.lineStyle(1, 0x00ff00, 0.5);
         rfSignalGraphics.strokeCircle(point.x, point.y, 30);
     }
 
-    // Lokalize marker oluştur
     createLocalizedMarker(point) {
-        // Ana marker dairesi
         localizedMarker = this.add.circle(point.x, point.y, 15, 0x00ff00, 0.3);
         localizedMarker.setStrokeStyle(2, 0x00ff00, 1);
         localizedMarker.setDepth(96);
 
-        // Pulse animasyonu
         this.tweens.add({
             targets: localizedMarker,
             scale: { from: 1, to: 1.5 },
@@ -422,69 +681,52 @@ class GameScene extends Phaser.Scene {
             ease: 'Sine.easeInOut'
         });
 
-        // Hedef çapraz işareti
         const crossGraphics = this.add.graphics();
         crossGraphics.setDepth(97);
         crossGraphics.lineStyle(2, 0x00ff00, 0.8);
-
-        // Yatay çizgi
         crossGraphics.moveTo(point.x - 20, point.y);
         crossGraphics.lineTo(point.x + 20, point.y);
-
-        // Dikey çizgi
         crossGraphics.moveTo(point.x, point.y - 20);
         crossGraphics.lineTo(point.x, point.y + 20);
-
         crossGraphics.strokePath();
     }
 
-    // === EW KAYNAĞI OLUŞTURMA ===
+    // === EW KAYNAĞI ===
     createEWSource() {
-        // EW etki alanı graphics
         ewAreaGraphics = this.add.graphics();
         ewAreaGraphics.setDepth(5);
 
-        // Sarı altıgen çiz
         const hexGraphics = this.add.graphics();
         const size = CONFIG.ew.size;
         const x = CONFIG.ew.x;
         const y = CONFIG.ew.y;
 
-        // Altıgen noktaları hesapla
         hexGraphics.fillStyle(CONFIG.ew.color, 1);
         hexGraphics.beginPath();
         for (let i = 0; i < 6; i++) {
             const angle = (Math.PI / 3) * i - Math.PI / 2;
             const px = x + size * Math.cos(angle);
             const py = y + size * Math.sin(angle);
-            if (i === 0) {
-                hexGraphics.moveTo(px, py);
-            } else {
-                hexGraphics.lineTo(px, py);
-            }
+            if (i === 0) hexGraphics.moveTo(px, py);
+            else hexGraphics.lineTo(px, py);
         }
         hexGraphics.closePath();
         hexGraphics.fillPath();
 
-        // Kenar çizgisi
         hexGraphics.lineStyle(2, 0xffffff, 0.8);
         hexGraphics.beginPath();
         for (let i = 0; i < 6; i++) {
             const angle = (Math.PI / 3) * i - Math.PI / 2;
             const px = x + size * Math.cos(angle);
             const py = y + size * Math.sin(angle);
-            if (i === 0) {
-                hexGraphics.moveTo(px, py);
-            } else {
-                hexGraphics.lineTo(px, py);
-            }
+            if (i === 0) hexGraphics.moveTo(px, py);
+            else hexGraphics.lineTo(px, py);
         }
         hexGraphics.closePath();
         hexGraphics.strokePath();
 
         hexGraphics.setDepth(10);
 
-        // EW kaynağı verisi
         ewSource = {
             graphics: hexGraphics,
             x: CONFIG.ew.x,
@@ -492,7 +734,6 @@ class GameScene extends Phaser.Scene {
             radius: CONFIG.ew.radius
         };
 
-        // "EW" etiketi
         const ewLabel = this.add.text(x, y, 'EW', {
             fontFamily: 'Arial Black',
             fontSize: '12px',
@@ -501,14 +742,12 @@ class GameScene extends Phaser.Scene {
         ewLabel.setOrigin(0.5, 0.5);
         ewLabel.setDepth(11);
 
-        // Başlangıçta görünmez (aktif olunca görünecek)
         hexGraphics.setAlpha(0.3);
         ewLabel.setAlpha(0.3);
 
         ewSource.label = ewLabel;
     }
 
-    // EW aktivasyonunu zamanla
     scheduleEWActivation() {
         this.time.delayedCall(CONFIG.ew.activationTime * 1000, () => {
             if (gameOver || ewDestroyed) return;
@@ -516,15 +755,12 @@ class GameScene extends Phaser.Scene {
         });
     }
 
-    // EW'yi aktifleştir
     activateEW() {
         ewActive = true;
 
-        // EW kaynağını tam görünür yap
         ewSource.graphics.setAlpha(1);
         ewSource.label.setAlpha(1);
 
-        // Parlama efekti
         this.tweens.add({
             targets: [ewSource.graphics, ewSource.label],
             alpha: { from: 0.3, to: 1 },
@@ -532,34 +768,26 @@ class GameScene extends Phaser.Scene {
             ease: 'Power2'
         });
 
-        // Uyarı mesajı
         this.showMessage('⚡ EW SİSTEMİ AKTİF! ⚡', 3000);
-
-        // Kenar pulse efektini başlat
         this.startEWBorderPulse();
 
-        // UI güncelle
         if (ewStatusText) {
             ewStatusText.setText('EW: AKTİF');
             ewStatusText.setColor('#ff3333');
         }
     }
 
-    // EW etki alanını çiz
     drawEWArea() {
         ewAreaGraphics.clear();
 
         if (!ewActive || ewDestroyed) return;
 
-        // Sarı daire (%20 opacity)
         ewAreaGraphics.fillStyle(CONFIG.ew.color, 0.2);
         ewAreaGraphics.fillCircle(CONFIG.ew.x, CONFIG.ew.y, CONFIG.ew.radius);
 
-        // Kenar çizgisi
         ewAreaGraphics.lineStyle(2, CONFIG.ew.color, 0.5);
         ewAreaGraphics.strokeCircle(CONFIG.ew.x, CONFIG.ew.y, CONFIG.ew.radius);
 
-        // Dalga efekti (iç daireler)
         const time = this.time.now;
         for (let i = 0; i < 3; i++) {
             const waveRadius = ((time / 1000 + i * 0.33) % 1) * CONFIG.ew.radius;
@@ -569,14 +797,12 @@ class GameScene extends Phaser.Scene {
         }
     }
 
-    // EW kenar efekti oluştur
     createEWBorderEffect() {
         ewBorderGraphics = this.add.graphics();
         ewBorderGraphics.setDepth(250);
         ewBorderGraphics.setAlpha(0);
     }
 
-    // Kenar pulse efektini başlat
     startEWBorderPulse() {
         if (ewPulseTween) ewPulseTween.stop();
 
@@ -590,33 +816,23 @@ class GameScene extends Phaser.Scene {
         });
     }
 
-    // Kenar efektini çiz
     drawEWBorder() {
         ewBorderGraphics.clear();
 
         if (!ewActive || ewDestroyed) return;
 
-        // Ekran kenarlarında kırmızı glow
         const borderWidth = 15;
 
-        // Gradient efekti için katmanlar
         for (let i = 0; i < borderWidth; i++) {
             const alpha = (1 - i / borderWidth) * 0.5;
             ewBorderGraphics.lineStyle(2, 0xff0000, alpha);
 
-            // Üst kenar
             ewBorderGraphics.moveTo(0, i);
             ewBorderGraphics.lineTo(CONFIG.width, i);
-
-            // Alt kenar
             ewBorderGraphics.moveTo(0, CONFIG.height - i);
             ewBorderGraphics.lineTo(CONFIG.width, CONFIG.height - i);
-
-            // Sol kenar
             ewBorderGraphics.moveTo(i, 0);
             ewBorderGraphics.lineTo(i, CONFIG.height);
-
-            // Sağ kenar
             ewBorderGraphics.moveTo(CONFIG.width - i, 0);
             ewBorderGraphics.lineTo(CONFIG.width - i, CONFIG.height);
 
@@ -630,22 +846,16 @@ class GameScene extends Phaser.Scene {
 
         artilleryFiring = true;
 
-        // Hedef işareti
         const targetMarker = this.add.graphics();
         targetMarker.setDepth(200);
         targetMarker.lineStyle(3, 0xff0000, 1);
-
-        // Hedef dairesi
         targetMarker.strokeCircle(localizedPoint.x, localizedPoint.y, 30);
-
-        // Çapraz
         targetMarker.moveTo(localizedPoint.x - 40, localizedPoint.y);
         targetMarker.lineTo(localizedPoint.x + 40, localizedPoint.y);
         targetMarker.moveTo(localizedPoint.x, localizedPoint.y - 40);
         targetMarker.lineTo(localizedPoint.x, localizedPoint.y + 40);
         targetMarker.strokePath();
 
-        // Geri sayım metni
         const countdownText = this.add.text(localizedPoint.x, localizedPoint.y - 60, '3', {
             fontFamily: 'Arial Black',
             fontSize: '48px',
@@ -656,12 +866,10 @@ class GameScene extends Phaser.Scene {
         countdownText.setOrigin(0.5, 0.5);
         countdownText.setDepth(201);
 
-        // Mesaj
         this.showMessage('🎯 TOPÇU ATIŞI GELİYOR!', 3000);
 
-        // 3 saniye geri sayım
         let countdown = 3;
-        const countdownTimer = this.time.addEvent({
+        this.time.addEvent({
             delay: 1000,
             callback: () => {
                 countdown--;
@@ -677,9 +885,7 @@ class GameScene extends Phaser.Scene {
         });
     }
 
-    // Topçu atışı gerçekleştir
     executeArtilleryStrike(point) {
-        // Patlama efekti
         const explosion = this.add.circle(point.x, point.y, 10, 0xff6600, 1);
         explosion.setDepth(202);
 
@@ -692,7 +898,6 @@ class GameScene extends Phaser.Scene {
             onComplete: () => explosion.destroy()
         });
 
-        // İkinci patlama halkası
         const ring = this.add.circle(point.x, point.y, 20);
         ring.setStrokeStyle(5, 0xffaa00, 1);
         ring.setDepth(201);
@@ -706,36 +911,27 @@ class GameScene extends Phaser.Scene {
             onComplete: () => ring.destroy()
         });
 
-        // Ekran sarsıntısı
         this.cameras.main.shake(500, 0.02);
-
-        // EW'yi yok et
         this.destroyEW();
 
-        // Lokalize marker'ı kaldır
-        if (localizedMarker) {
-            localizedMarker.destroy();
-        }
+        if (localizedMarker) localizedMarker.destroy();
     }
 
-    // EW'yi yok et
     destroyEW() {
         ewDestroyed = true;
+        ewDestroyedTime = this.time.now;
         ewActive = false;
 
-        // EW grafiklerini gizle
         if (ewSource) {
             ewSource.graphics.setVisible(false);
             ewSource.label.setVisible(false);
         }
 
-        // Kenar efektini durdur
         if (ewPulseTween) {
             ewPulseTween.stop();
             ewBorderGraphics.setAlpha(0);
         }
 
-        // Tüm drone'ların jamming durumunu temizle
         drones.forEach(drone => {
             if (drone.droneData.isJammed) {
                 this.onDroneExitJamming(drone);
@@ -743,30 +939,24 @@ class GameScene extends Phaser.Scene {
             drone.droneData.isJammed = false;
         });
 
-        // Başarı mesajı
         this.showMessage('💥 EW YOK EDİLDİ! Görüş geri kazanıldı!', 4000);
 
-        // UI güncelle
         if (ewStatusText) {
             ewStatusText.setText('EW: YOK EDİLDİ');
             ewStatusText.setColor('#00ff00');
         }
 
-        // Topçu durumunu güncelle
         artilleryReady = false;
         artilleryFiring = false;
     }
 
-    // RF durumu UI güncelle
     updateRFStatusUI() {
         if (!rfStatusText) return;
 
         if (ewDestroyed) {
             rfStatusText.setText('RF: YOK EDİLDİ');
             rfStatusText.setColor('#00ff00');
-            if (artilleryText) {
-                artilleryText.setText('');
-            }
+            if (artilleryText) artilleryText.setText('');
         } else if (rfLocalized) {
             rfStatusText.setText('RF: LOKALİZE');
             rfStatusText.setColor('#00ff00');
@@ -775,7 +965,6 @@ class GameScene extends Phaser.Scene {
                 artilleryText.setColor('#ffff00');
             }
         } else {
-            // Tespit eden drone var mı?
             const detectingDrones = drones.filter(drone =>
                 drone.droneData.isAlive && drone.y < CONFIG.rf.detectionZoneY
             );
@@ -794,7 +983,6 @@ class GameScene extends Phaser.Scene {
     createDrone(x, y, index) {
         const graphics = this.add.graphics();
 
-        // Mavi üçgen çiz
         graphics.fillStyle(CONFIG.drone.color);
         graphics.beginPath();
         graphics.moveTo(0, -CONFIG.drone.size);
@@ -803,15 +991,12 @@ class GameScene extends Phaser.Scene {
         graphics.closePath();
         graphics.fillPath();
 
-        // Texture oluştur
         graphics.generateTexture('drone_' + index, CONFIG.drone.size * 2, CONFIG.drone.size * 2);
         graphics.destroy();
 
-        // Sprite oluştur
         const drone = this.add.sprite(x, y, 'drone_' + index);
         drone.setOrigin(0.5, 0.5);
 
-        // Drone özellikleri
         drone.droneData = {
             index: index,
             targetX: x,
@@ -821,7 +1006,6 @@ class GameScene extends Phaser.Scene {
             isAlive: true,
             visionRadius: CONFIG.drone.visionRadius,
             baseVisionRadius: CONFIG.drone.visionRadius,
-            // EW etki değişkenleri
             isJammed: false,
             currentVisionRadius: CONFIG.drone.visionRadius,
             pendingCommand: null,
@@ -829,17 +1013,14 @@ class GameScene extends Phaser.Scene {
             jammingWarningShown: false
         };
 
-        // Seçim highlight'ı
         drone.highlight = this.add.circle(x, y, CONFIG.drone.size + 5);
         drone.highlight.setStrokeStyle(2, CONFIG.drone.selectedColor);
         drone.highlight.setVisible(false);
 
-        // Görüş alanı göstergesi (debug için - yarı saydam)
         drone.visionCircle = this.add.circle(x, y, CONFIG.drone.visionRadius);
         drone.visionCircle.setStrokeStyle(1, CONFIG.drone.color, 0.3);
         drone.visionCircle.setFillStyle(CONFIG.drone.color, 0.05);
 
-        // Jamming göstergesi
         drone.jamIndicator = this.add.text(x, y - 30, '⚠️ JAMMING!', {
             fontFamily: 'Arial Black',
             fontSize: '12px',
@@ -879,34 +1060,26 @@ class GameScene extends Phaser.Scene {
             const wasJammed = drone.droneData.isJammed;
             drone.droneData.isJammed = dist <= CONFIG.ew.radius;
 
-            // Jamming durumuna girdi
             if (drone.droneData.isJammed && !wasJammed) {
                 this.onDroneEnterJamming(drone);
-            }
-            // Jamming durumundan çıktı
-            else if (!drone.droneData.isJammed && wasJammed) {
+            } else if (!drone.droneData.isJammed && wasJammed) {
                 this.onDroneExitJamming(drone);
             }
 
-            // Jamming aktifken görüş yarıçapını güncelle
             if (drone.droneData.isJammed) {
                 this.updateJammedDroneVision(drone);
             }
         });
     }
 
-    // Drone jamming alanına girdi
     onDroneEnterJamming(drone) {
-        // Uyarı göster (sadece bir kez)
         if (!drone.droneData.jammingWarningShown) {
             this.showMessage('⚠️ JAMMING! Bağlantı kesiliyor...', 2000);
             drone.droneData.jammingWarningShown = true;
         }
 
-        // Jamming göstergesini aç
         drone.jamIndicator.setVisible(true);
 
-        // Titreme efekti
         this.tweens.add({
             targets: drone.jamIndicator,
             alpha: { from: 1, to: 0.3 },
@@ -915,10 +1088,8 @@ class GameScene extends Phaser.Scene {
             repeat: -1
         });
 
-        // Ekran shake efekti
         this.cameras.main.shake(500, 0.005);
 
-        // Görüş yarıçapını kademeli azalt (2 saniye)
         this.tweens.add({
             targets: drone.droneData,
             currentVisionRadius: 0,
@@ -930,20 +1101,15 @@ class GameScene extends Phaser.Scene {
             }
         });
 
-        // Drone rengini değiştir (sarı tint)
         drone.setTint(0xffaa00);
     }
 
-    // Drone jamming alanından çıktı
     onDroneExitJamming(drone) {
-        // Mesaj göster
         this.showMessage('📡 Bağlantı yeniden kuruldu', 2000);
 
-        // Jamming göstergesini kapat
         drone.jamIndicator.setVisible(false);
         this.tweens.killTweensOf(drone.jamIndicator);
 
-        // Görüş yarıçapını geri getir (2 saniye)
         this.tweens.add({
             targets: drone.droneData,
             currentVisionRadius: drone.droneData.baseVisionRadius,
@@ -955,29 +1121,21 @@ class GameScene extends Phaser.Scene {
             }
         });
 
-        // Drone rengini normal yap
         drone.clearTint();
-
-        // Uyarı flag'ini sıfırla (tekrar girerse yine göstersin)
         drone.droneData.jammingWarningShown = false;
     }
 
-    // Jamming durumundaki drone görüş güncellemesi
     updateJammedDroneVision(drone) {
-        // Sürekli shake efekti (hafif)
         if (Math.random() < 0.1) {
             this.cameras.main.shake(100, 0.002);
         }
 
-        // Jamming göstergesini drone'a yapıştır
         drone.jamIndicator.x = drone.x;
         drone.jamIndicator.y = drone.y - 30;
     }
 
-    // Gecikmeli komut işleme
     processDelayedCommand(drone, targetX, targetY) {
         if (drone.droneData.isJammed) {
-            // Jamming durumunda komutlara 0.5sn gecikme
             if (drone.droneData.commandDelayTimer) {
                 drone.droneData.commandDelayTimer.remove();
             }
@@ -996,10 +1154,8 @@ class GameScene extends Phaser.Scene {
                 }
             );
 
-            // Gecikme göstergesi
             this.showMessage('📡 Komut gecikiyor...', 500);
         } else {
-            // Normal durumda anında hareket
             drone.droneData.targetX = targetX;
             drone.droneData.targetY = targetY;
             drone.droneData.isMoving = true;
@@ -1011,10 +1167,8 @@ class GameScene extends Phaser.Scene {
         let enemy;
 
         if (type === 'tank') {
-            // Kırmızı kare (tank)
             enemy = this.add.rectangle(x, y, CONFIG.enemy.tank.size, CONFIG.enemy.tank.size, CONFIG.enemy.tank.color);
         } else if (type === 'patrol') {
-            // Kırmızı daire (patrol)
             enemy = this.add.circle(x, y, CONFIG.enemy.patrol.size, CONFIG.enemy.patrol.color);
         }
 
@@ -1025,29 +1179,24 @@ class GameScene extends Phaser.Scene {
             ...config
         };
 
-        // Patrol için görüş konisi
         if (type === 'patrol') {
             enemy.visionCone = this.add.graphics();
-            enemy.enemyData.direction = 1; // Başlangıç yönü (sağa)
+            enemy.enemyData.direction = 1;
             enemy.enemyData.facingAngle = 0;
         }
 
-        // Başlangıçta görünmez
         enemy.setVisible(false);
 
         return enemy;
     }
 
     createEnemies() {
-        // Tank #1
         const tank1 = this.createEnemy('tank', 300, 200, { name: 'TANK #1' });
         enemies.push(tank1);
 
-        // Tank #2
         const tank2 = this.createEnemy('tank', 700, 250, { name: 'TANK #2' });
         enemies.push(tank2);
 
-        // Patrol
         const patrol = this.createEnemy('patrol', 500, 300, {
             name: 'DEVRIYE',
             minX: CONFIG.enemy.patrol.minX,
@@ -1057,63 +1206,48 @@ class GameScene extends Phaser.Scene {
         enemies.push(patrol);
     }
 
-    // === FOG OF WAR SİSTEMİ ===
+    // === FOG OF WAR ===
     createFogOfWar() {
-        // Keşfedilmiş alanları tutan render texture
         this.exploredRT = this.add.renderTexture(0, 0, CONFIG.width, CONFIG.height);
         this.exploredRT.setVisible(false);
 
-        // Ana fog graphics (siyah katman)
         fogGraphics = this.add.graphics();
         fogGraphics.setDepth(100);
 
-        // Keşfedilmiş alan göstergesi (gri katman)
         this.exploredGraphics = this.add.graphics();
         this.exploredGraphics.setDepth(99);
     }
 
-    // Gelişmiş Fog of War render sistemi
     renderFogOfWar() {
         fogGraphics.clear();
         this.exploredGraphics.clear();
 
-        // Aktif görüş alanları
         const activeAreas = [];
         drones.forEach(drone => {
             if (drone.droneData.isAlive) {
-                // Güncel görüş yarıçapını kullan (jamming etkisini yansıtır)
                 const radius = drone.droneData.currentVisionRadius || drone.droneData.visionRadius;
                 if (radius > 0) {
                     activeAreas.push({ x: drone.x, y: drone.y, r: radius });
-
-                    // Keşfedilmiş alanlara ekle
-                    exploredAreas.push({
-                        x: drone.x,
-                        y: drone.y,
-                        radius: radius
-                    });
+                    exploredAreas.push({ x: drone.x, y: drone.y, radius: radius });
                 }
             }
         });
 
-        // 1. Tam siyah arka plan
         fogGraphics.fillStyle(0x000000, 1);
         fogGraphics.fillRect(0, 0, CONFIG.width, CONFIG.height);
 
-        // 2. Keşfedilmiş alanları gri yap
         exploredAreas.forEach(area => {
             fogGraphics.fillStyle(0x000000, 0.5);
             fogGraphics.fillCircle(area.x, area.y, area.radius);
         });
 
-        // 3. Aktif görüş alanlarını tamamen aç
         activeAreas.forEach(area => {
             fogGraphics.fillStyle(0x1a2f1a, 1);
             fogGraphics.fillCircle(area.x, area.y, area.r);
         });
     }
 
-    // === UI OLUŞTURMA ===
+    // === UI ===
     createUI() {
         const textStyle = {
             fontFamily: 'Arial, sans-serif',
@@ -1123,58 +1257,61 @@ class GameScene extends Phaser.Scene {
             strokeThickness: 3
         };
 
-        const titleStyle = {
-            ...textStyle,
-            fontSize: '22px',
-            fontStyle: 'bold'
-        };
+        const titleStyle = { ...textStyle, fontSize: '22px', fontStyle: 'bold' };
 
-        // Sol üst: Drone sayısı
+        // Sol üst
         droneCountText = this.add.text(20, 20, 'DRONE: 4/4', titleStyle);
         droneCountText.setDepth(200);
 
-        // Sol üst alt: EW durumu
-        ewStatusText = this.add.text(20, 50, 'EW: PASİF', {
-            ...textStyle,
-            fontSize: '18px',
-            color: '#00ff00'
-        });
+        ewStatusText = this.add.text(20, 50, 'EW: PASİF', { ...textStyle, fontSize: '18px', color: '#00ff00' });
         ewStatusText.setDepth(200);
 
-        // Orta üst: Tespit sayısı
+        // Decoy
+        decoyText = this.add.text(20, CONFIG.height - 80, '📡 DECOY: 1 [D]', { ...textStyle, fontSize: '16px', color: '#00ff00' });
+        decoyText.setDepth(200);
+
+        // Orta üst
         detectionCountText = this.add.text(CONFIG.width / 2, 20, 'TESPİT: 0/3', titleStyle);
         detectionCountText.setOrigin(0.5, 0);
         detectionCountText.setDepth(200);
 
-        // Sağ üst: Zamanlayıcı
+        // Counter-Vision uyarısı
+        counterVisionWarningText = this.add.text(CONFIG.width / 2, 90, '⚠️ DÜŞMAN KEŞFİ AKTİF', {
+            ...textStyle, fontSize: '18px', color: '#ff3333'
+        });
+        counterVisionWarningText.setOrigin(0.5, 0.5);
+        counterVisionWarningText.setDepth(200);
+        counterVisionWarningText.setVisible(false);
+
+        // Yanıp sönme animasyonu
+        this.tweens.add({
+            targets: counterVisionWarningText,
+            alpha: { from: 1, to: 0.3 },
+            duration: 500,
+            yoyo: true,
+            repeat: -1
+        });
+
+        // Counter-Vision durumu
+        counterVisionStatusText = this.add.text(CONFIG.width / 2, 115, '', { ...textStyle, fontSize: '14px', color: '#ff6666' });
+        counterVisionStatusText.setOrigin(0.5, 0);
+        counterVisionStatusText.setDepth(200);
+
+        // Sağ üst
         timerText = this.add.text(CONFIG.width - 20, 20, 'SÜRE: 05:00', titleStyle);
         timerText.setOrigin(1, 0);
         timerText.setDepth(200);
 
-        // Sağ panel: RF durumu
-        rfStatusText = this.add.text(CONFIG.width - 20, 50, 'RF: ARANIYOR', {
-            ...textStyle,
-            fontSize: '16px',
-            color: '#888888'
-        });
+        rfStatusText = this.add.text(CONFIG.width - 20, 50, 'RF: ARANIYOR', { ...textStyle, fontSize: '16px', color: '#888888' });
         rfStatusText.setOrigin(1, 0);
         rfStatusText.setDepth(200);
 
-        // Sağ panel: Topçu durumu
-        artilleryText = this.add.text(CONFIG.width - 20, 75, '', {
-            ...textStyle,
-            fontSize: '14px',
-            color: '#ffff00'
-        });
+        artilleryText = this.add.text(CONFIG.width - 20, 75, '', { ...textStyle, fontSize: '14px', color: '#ffff00' });
         artilleryText.setOrigin(1, 0);
         artilleryText.setDepth(200);
 
-        // Alt orta: Mesaj alanı
-        messageText = this.add.text(CONFIG.width / 2, CONFIG.height - 50, '', {
-            ...textStyle,
-            fontSize: '24px',
-            color: '#ffff00'
-        });
+        // Alt orta
+        messageText = this.add.text(CONFIG.width / 2, CONFIG.height - 50, '', { ...textStyle, fontSize: '24px', color: '#ffff00' });
         messageText.setOrigin(0.5, 0.5);
         messageText.setDepth(200);
 
@@ -1190,17 +1327,15 @@ class GameScene extends Phaser.Scene {
         title.setDepth(200);
         title.setAlpha(0.7);
 
-        // Kontrol bilgisi
+        // Kontroller
         const controls = this.add.text(CONFIG.width / 2, CONFIG.height - 20,
-            'Sol Tık: Seç | Sağ Tık: Hareket Et | SPACE: Topçu Atışı', {
-            ...textStyle,
-            fontSize: '14px',
-            color: '#aaaaaa'
+            'Sol Tık: Seç | Sağ Tık: Hareket | SPACE: Topçu | D: Decoy', {
+            ...textStyle, fontSize: '14px', color: '#aaaaaa'
         });
         controls.setOrigin(0.5, 0.5);
         controls.setDepth(200);
 
-        // EW aktivasyon geri sayımı
+        // EW geri sayım
         this.ewCountdownText = this.add.text(CONFIG.ew.x, CONFIG.ew.y + 40, '', {
             fontFamily: 'Arial',
             fontSize: '14px',
@@ -1213,24 +1348,17 @@ class GameScene extends Phaser.Scene {
     }
 
     updateUI() {
-        // Kalan drone sayısı
         const aliveDrones = drones.filter(d => d.droneData.isAlive).length;
         droneCountText.setText(`DRONE: ${aliveDrones}/${CONFIG.drone.count}`);
 
-        // Tespit sayısı
         detectionCountText.setText(`TESPİT: ${detectedEnemies.size}/3`);
 
-        // Zamanlayıcı
         const minutes = Math.floor(remainingTime / 60);
         const seconds = remainingTime % 60;
         timerText.setText(`SÜRE: ${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`);
 
-        // Renk değişimi (az süre kaldığında)
-        if (remainingTime <= 30) {
-            timerText.setColor('#ff3333');
-        } else if (remainingTime <= 60) {
-            timerText.setColor('#ffaa00');
-        }
+        if (remainingTime <= 30) timerText.setColor('#ff3333');
+        else if (remainingTime <= 60) timerText.setColor('#ffaa00');
 
         // EW geri sayım
         if (!ewDestroyed) {
@@ -1249,20 +1377,43 @@ class GameScene extends Phaser.Scene {
             ewStatusText.setText('EW: YOK EDİLDİ');
             ewStatusText.setColor('#00ff00');
         } else if (ewActive) {
-            ewStatusText.setText('EW: AKTİF');
-            ewStatusText.setColor('#ff3333');
-
-            // Jamming altındaki drone sayısını göster
             const jammedCount = drones.filter(d => d.droneData.isAlive && d.droneData.isJammed).length;
-            if (jammedCount > 0) {
-                ewStatusText.setText(`EW: AKTİF (${jammedCount} drone etki altında)`);
-            }
+            ewStatusText.setText(jammedCount > 0 ? `EW: AKTİF (${jammedCount} etki altında)` : 'EW: AKTİF');
+            ewStatusText.setColor('#ff3333');
         } else {
             ewStatusText.setText('EW: PASİF');
             ewStatusText.setColor('#00ff00');
         }
 
-        // RF durumunu güncelle
+        // Decoy durumu
+        if (decoyPlaced && decoyActive) {
+            decoyText.setText(`📡 DECOY: AKTİF (${decoyTimer}sn)`);
+            decoyText.setColor('#00ff00');
+        } else if (decoyCount > 0) {
+            decoyText.setText(`📡 DECOY: ${decoyCount} [D]`);
+            decoyText.setColor('#00ff00');
+        } else {
+            decoyText.setText('📡 DECOY: KULLANILDI');
+            decoyText.setColor('#888888');
+        }
+
+        // Counter-Vision durumu
+        if (counterVisionActive) {
+            counterVisionWarningText.setVisible(true);
+
+            if (counterVisionPaused) {
+                const pauseSeconds = Math.ceil(counterVisionPauseTime / 1000);
+                counterVisionStatusText.setText(`Düşman decoy'u tarıyor... (${pauseSeconds}sn)`);
+            } else if (counterVisionReachedEnd) {
+                counterVisionStatusText.setText(`💀 TOPÇU ATIŞI: ${enemyArtilleryCountdown}sn`);
+                counterVisionStatusText.setColor('#ff0000');
+            } else {
+                const distance = CONFIG.counterVision.endY - counterVisionY;
+                const timeToEnd = Math.ceil(distance / CONFIG.counterVision.speed);
+                counterVisionStatusText.setText(`Tarama: Y=${Math.round(counterVisionY)} | Varış: ${timeToEnd}sn`);
+            }
+        }
+
         this.updateRFStatusUI();
     }
 
@@ -1278,35 +1429,52 @@ class GameScene extends Phaser.Scene {
         });
     }
 
-    // === INPUT YÖNETİMİ ===
+    // === INPUT ===
     setupInput() {
-        // Sol tık: Drone seçimi
         this.input.on('pointerdown', (pointer) => {
             if (gameOver) return;
 
             if (pointer.leftButtonDown()) {
-                this.handleLeftClick(pointer);
+                if (decoyMode) {
+                    this.placeDecoy(pointer.x, pointer.y);
+                } else {
+                    this.handleLeftClick(pointer);
+                }
             } else if (pointer.rightButtonDown()) {
                 this.handleRightClick(pointer);
             }
         });
 
-        // Sağ tık context menu'yü engelle
+        this.input.on('pointermove', (pointer) => {
+            this.updateDecoyPreview(pointer);
+        });
+
         this.input.mouse.disableContextMenu();
 
-        // SPACE tuşu: Topçu atışı
+        // SPACE: Topçu
         this.input.keyboard.on('keydown-SPACE', () => {
             if (gameOver) return;
             if (artilleryReady && !artilleryFiring) {
                 this.fireArtillery();
             }
         });
+
+        // D: Decoy
+        this.input.keyboard.on('keydown-D', () => {
+            if (gameOver) return;
+            this.toggleDecoyMode();
+        });
+
+        // ESC: Decoy modunu iptal
+        this.input.keyboard.on('keydown-ESC', () => {
+            decoyMode = false;
+            if (decoyPreview) decoyPreview.setVisible(false);
+        });
     }
 
     handleLeftClick(pointer) {
         let clickedDrone = null;
 
-        // Tıklanan drone'u bul
         drones.forEach(drone => {
             if (!drone.droneData.isAlive) return;
 
@@ -1316,13 +1484,11 @@ class GameScene extends Phaser.Scene {
             }
         });
 
-        // Önceki seçimi kaldır
         if (selectedDrone) {
             selectedDrone.highlight.setVisible(false);
             selectedDrone.droneData.isSelected = false;
         }
 
-        // Yeni seçim
         if (clickedDrone) {
             selectedDrone = clickedDrone;
             selectedDrone.highlight.setVisible(true);
@@ -1335,7 +1501,6 @@ class GameScene extends Phaser.Scene {
     handleRightClick(pointer) {
         if (!selectedDrone || !selectedDrone.droneData.isAlive) return;
 
-        // Hareket göstergesi efekti
         const marker = this.add.circle(pointer.x, pointer.y, 10, 0x00ff00, 0.5);
         this.tweens.add({
             targets: marker,
@@ -1345,7 +1510,6 @@ class GameScene extends Phaser.Scene {
             onComplete: () => marker.destroy()
         });
 
-        // Gecikmeli komut işleme (EW etkisi için)
         this.processDelayedCommand(selectedDrone, pointer.x, pointer.y);
     }
 
@@ -1371,40 +1535,26 @@ class GameScene extends Phaser.Scene {
     update(time, delta) {
         if (gameOver) return;
 
-        // Drone hareketlerini güncelle
         this.updateDrones(delta);
-
-        // Düşman hareketlerini güncelle
         this.updateEnemies(delta);
-
-        // EW etkisini kontrol et
         this.checkEWEffect();
-
-        // EW alanını çiz
         this.drawEWArea();
-
-        // EW kenar efektini çiz
         this.drawEWBorder();
-
-        // RF sinyallerini güncelle
         this.updateRFSignals();
 
-        // Görüş kontrolü
+        // Counter-Vision
+        this.checkCounterVisionActivation();
+        this.updateCounterVision(delta);
+        this.drawCounterVision();
+
+        // Decoy
+        this.drawDecoy();
+
         this.checkVisibility();
-
-        // Fog of War güncelle
         this.renderFogOfWar();
-
-        // Patrol görüş konisi çiz
         this.drawPatrolVisionCone();
-
-        // Tespit kontrolü
         this.checkPatrolDetection();
-
-        // UI güncelle
         this.updateUI();
-
-        // Kazanma kontrolü
         this.checkWinCondition();
     }
 
@@ -1423,20 +1573,17 @@ class GameScene extends Phaser.Scene {
                 return;
             }
 
-            // Normalize ve hareket
             const moveX = (dx / dist) * speed;
             const moveY = (dy / dist) * speed;
 
             drone.x += moveX;
             drone.y += moveY;
 
-            // Highlight ve görüş alanını güncelle
             drone.highlight.x = drone.x;
             drone.highlight.y = drone.y;
             drone.visionCircle.x = drone.x;
             drone.visionCircle.y = drone.y;
 
-            // Rotasyonu hedefe çevir
             drone.rotation = Math.atan2(dy, dx) + Math.PI / 2;
         });
     }
@@ -1446,11 +1593,8 @@ class GameScene extends Phaser.Scene {
         if (!patrol) return;
 
         const speed = patrol.enemyData.speed * (delta / 1000);
-
-        // Yatay hareket
         patrol.x += speed * patrol.enemyData.direction;
 
-        // Sınır kontrolü
         if (patrol.x >= patrol.enemyData.maxX) {
             patrol.x = patrol.enemyData.maxX;
             patrol.enemyData.direction = -1;
@@ -1468,23 +1612,19 @@ class GameScene extends Phaser.Scene {
 
         patrol.visionCone.clear();
 
-        // Sadece patrol görünürse koniyi çiz
         if (!patrol.enemyData.isVisible && !patrol.enemyData.isRevealed) return;
 
         const angle = patrol.enemyData.facingAngle;
         const halfAngle = CONFIG.enemy.patrol.visionAngle / 2;
         const range = CONFIG.enemy.patrol.visionRange;
 
-        // Görüş konisi çiz
         patrol.visionCone.fillStyle(0xff0000, 0.3);
         patrol.visionCone.beginPath();
         patrol.visionCone.moveTo(patrol.x, patrol.y);
 
-        // Koni açısını hesapla
         const startAngle = Phaser.Math.DegToRad(angle - halfAngle);
         const endAngle = Phaser.Math.DegToRad(angle + halfAngle);
 
-        // Arc çiz
         const segments = 20;
         for (let i = 0; i <= segments; i++) {
             const a = startAngle + (endAngle - startAngle) * (i / segments);
@@ -1502,18 +1642,15 @@ class GameScene extends Phaser.Scene {
         enemies.forEach(enemy => {
             let isCurrentlyVisible = false;
 
-            // Her drone'un görüş alanını kontrol et
             drones.forEach(drone => {
                 if (!drone.droneData.isAlive) return;
 
-                // Güncel görüş yarıçapını kullan
                 const visionRadius = drone.droneData.currentVisionRadius || drone.droneData.visionRadius;
-
                 const dist = Phaser.Math.Distance.Between(drone.x, drone.y, enemy.x, enemy.y);
+
                 if (dist <= visionRadius) {
                     isCurrentlyVisible = true;
 
-                    // İlk tespit
                     if (!enemy.enemyData.isRevealed) {
                         enemy.enemyData.isRevealed = true;
                         detectedEnemies.add(enemy);
@@ -1524,15 +1661,9 @@ class GameScene extends Phaser.Scene {
 
             enemy.enemyData.isVisible = isCurrentlyVisible;
 
-            // Görünürlük durumu
             if (isCurrentlyVisible || enemy.enemyData.isRevealed) {
                 enemy.setVisible(true);
-                // Görünür değilse ama tespit edilmişse yarı saydam göster
-                if (!isCurrentlyVisible && enemy.enemyData.isRevealed) {
-                    enemy.setAlpha(0.5);
-                } else {
-                    enemy.setAlpha(1);
-                }
+                enemy.setAlpha(isCurrentlyVisible ? 1 : 0.5);
             }
         });
     }
@@ -1548,20 +1679,16 @@ class GameScene extends Phaser.Scene {
         drones.forEach(drone => {
             if (!drone.droneData.isAlive) return;
 
-            // Mesafe kontrolü
             const dist = Phaser.Math.Distance.Between(patrol.x, patrol.y, drone.x, drone.y);
             if (dist > range) return;
 
-            // Açı kontrolü
             const angleToDrone = Phaser.Math.RadToDeg(Math.atan2(drone.y - patrol.y, drone.x - patrol.x));
             let angleDiff = angleToDrone - angle;
 
-            // Açı farkını normalize et
             while (angleDiff > 180) angleDiff -= 360;
             while (angleDiff < -180) angleDiff += 360;
 
             if (Math.abs(angleDiff) <= halfAngle) {
-                // Tespit edildi!
                 this.droneDetected(drone);
             }
         });
@@ -1570,23 +1697,17 @@ class GameScene extends Phaser.Scene {
     droneDetected(drone) {
         if (!drone.droneData.isAlive) return;
 
-        // Mesaj göster
         this.showMessage('🚨 TESPİT EDİLDİN! 🚨', CONFIG.game.droneDestroyDelay);
-
-        // Drone'u kırmızı yap
         drone.setTint(0xff0000);
 
-        // 3 saniye sonra yok et
         this.time.delayedCall(CONFIG.game.droneDestroyDelay, () => {
             this.destroyDrone(drone);
         });
 
-        // Geçici olarak hareket etmesini engelle
         drone.droneData.isAlive = false;
     }
 
     destroyDrone(drone) {
-        // Patlama efekti
         const explosion = this.add.circle(drone.x, drone.y, 5, 0xff6600);
         this.tweens.add({
             targets: explosion,
@@ -1596,18 +1717,13 @@ class GameScene extends Phaser.Scene {
             onComplete: () => explosion.destroy()
         });
 
-        // Drone'u gizle
         drone.setVisible(false);
         drone.highlight.setVisible(false);
         drone.visionCircle.setVisible(false);
         drone.jamIndicator.setVisible(false);
 
-        // Seçili drone ise seçimi kaldır
-        if (selectedDrone === drone) {
-            selectedDrone = null;
-        }
+        if (selectedDrone === drone) selectedDrone = null;
 
-        // Tüm drone'lar öldü mü kontrol et
         const aliveDrones = drones.filter(d => d.droneData.isAlive && d.visible !== false);
         if (aliveDrones.length === 0) {
             this.endGame(false, 'TÜM DRONE\'LAR YOK EDİLDİ!');
@@ -1623,17 +1739,12 @@ class GameScene extends Phaser.Scene {
     endGame(won, reason) {
         gameOver = true;
 
-        // Zamanlayıcıyı durdur
         if (gameTimer) gameTimer.remove();
-
-        // EW pulse'u durdur
         if (ewPulseTween) ewPulseTween.stop();
 
-        // Karartma efekti
         const overlay = this.add.rectangle(CONFIG.width / 2, CONFIG.height / 2, CONFIG.width, CONFIG.height, 0x000000, 0.8);
         overlay.setDepth(300);
 
-        // Sonuç metni
         const resultStyle = {
             fontFamily: 'Arial Black, sans-serif',
             fontSize: '48px',
@@ -1648,7 +1759,6 @@ class GameScene extends Phaser.Scene {
         resultText.setOrigin(0.5);
         resultText.setDepth(301);
 
-        // Sebep metni
         const reasonText = this.add.text(CONFIG.width / 2, CONFIG.height / 2 + 30, reason, {
             fontFamily: 'Arial, sans-serif',
             fontSize: '24px',
@@ -1659,9 +1769,8 @@ class GameScene extends Phaser.Scene {
         reasonText.setOrigin(0.5);
         reasonText.setDepth(301);
 
-        // İstatistikler
         const ewStatus = ewDestroyed ? 'YOK EDİLDİ' : (ewActive ? 'AKTİF' : 'PASİF');
-        const stats = `Tespit Edilen Düşman: ${detectedEnemies.size}/3\nKalan Drone: ${drones.filter(d => d.droneData.isAlive).length}/${CONFIG.drone.count}\nEW Durumu: ${ewStatus}`;
+        const stats = `Tespit: ${detectedEnemies.size}/3 | Drone: ${drones.filter(d => d.droneData.isAlive).length}/${CONFIG.drone.count} | EW: ${ewStatus}`;
         const statsText = this.add.text(CONFIG.width / 2, CONFIG.height / 2 + 100, stats, {
             fontFamily: 'Arial, sans-serif',
             fontSize: '20px',
@@ -1673,8 +1782,7 @@ class GameScene extends Phaser.Scene {
         statsText.setOrigin(0.5);
         statsText.setDepth(301);
 
-        // Yeniden başlat butonu
-        const restartText = this.add.text(CONFIG.width / 2, CONFIG.height / 2 + 180, '[ TIKLA - YENİDEN BAŞLA ]', {
+        const restartText = this.add.text(CONFIG.width / 2, CONFIG.height / 2 + 160, '[ TIKLA - YENİDEN BAŞLA ]', {
             fontFamily: 'Arial, sans-serif',
             fontSize: '22px',
             color: '#ffff00',
@@ -1691,7 +1799,7 @@ class GameScene extends Phaser.Scene {
     }
 }
 
-// === PHASER OYUN KONFIGÜRASYONU ===
+// === PHASER KONFIGÜRASYONU ===
 const gameConfig = {
     type: Phaser.AUTO,
     width: CONFIG.width,
@@ -1701,13 +1809,10 @@ const gameConfig = {
     scene: GameScene,
     physics: {
         default: 'arcade',
-        arcade: {
-            debug: false
-        }
+        arcade: { debug: false }
     }
 };
 
-// Oyunu başlat
 const game = new Phaser.Game(gameConfig);
     </script>
 </body>
