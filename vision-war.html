@@ -31,13 +31,16 @@
 // ==========================================
 // VISION WAR - RTS PROTOTYPE
 // Fog of War + EW + Triangülasyon + Counter-Vision
+// Multi-Threat + Patrol D + Helikopter Final
 // ==========================================
 
 // === KONFIGÜRASYON ===
 const CONFIG = {
-    // Ekran ayarları
+    // Ekran ayarları (oyun alanı + panel)
     width: 1024,
     height: 768,
+    gameWidth: 824, // Oyun alanı (panel hariç)
+    panelWidth: 200, // Sağ panel genişliği
     backgroundColor: 0x1a2f1a,
 
     // Drone ayarları
@@ -48,7 +51,7 @@ const CONFIG = {
         color: 0x4488ff,
         selectedColor: 0xffff00,
         size: 16,
-        startX: 512,
+        startX: 412, // Oyun alanı ortası (824/2)
         startY: 650,
         spacing: 50
     },
@@ -63,16 +66,31 @@ const CONFIG = {
             color: 0xff3333,
             size: 16,
             speed: 50,
-            minX: 400,
-            maxX: 600,
+            minX: 300,
+            maxX: 500,
             visionAngle: 120,
             visionRange: 80
+        },
+        // PATROL D - Yeni düşman
+        patrolD: {
+            color: 0xff0000,
+            size: 20,
+            speed: 40,
+            activationTime: 90, // 90. saniyede aktif
+            startX: 800, // Doğudan başlar
+            startY: 200,
+            targetX: 412, // Oyuncu başlangıç bölgesi
+            targetY: 650,
+            visionAngle: 90,
+            visionRange: 100,
+            warningDistance: 150, // Uyarı mesafesi
+            dangerDistance: 50 // Game over mesafesi
         }
     },
 
     // EW (Elektronik Harp) ayarları
     ew: {
-        x: 500,
+        x: 400,
         y: 150,
         radius: 150,
         color: 0xffcc00,
@@ -84,7 +102,7 @@ const CONFIG = {
 
     // RF / Triangülasyon ayarları
     rf: {
-        x: 500,
+        x: 400,
         y: 180,
         detectionZoneY: 400,
         signalLineLength: 200,
@@ -114,6 +132,15 @@ const CONFIG = {
         color: 0x00ff00
     },
 
+    // Helikopter Final ayarları
+    helicopter: {
+        x: 412,
+        y: 50,
+        countdownDuration: 30, // 30 saniye
+        safeZoneY: 500, // Y > 500 güvenli bölge
+        triggerTimeRemaining: 60 // Son 60 saniye
+    },
+
     // Fog of War ayarları
     fog: {
         unexploredAlpha: 1.0,
@@ -126,6 +153,15 @@ const CONFIG = {
         duration: 300,
         detectionMessageDuration: 2000,
         droneDestroyDelay: 3000
+    },
+
+    // Maliyet ayarları (Final ekranı için)
+    cost: {
+        droneUnitCost: 400, // Drone başına $400
+        decoyUnitCost: 200, // Decoy $200
+        tankValue: 2500000, // Tank değeri $2.5M
+        patrolValue: 1500000, // Patrol değeri $1.5M
+        ewValue: 4050000 // EW sistemi değeri $4.05M
     }
 };
 
@@ -139,6 +175,8 @@ let detectedEnemies = new Set();
 let gameTimer;
 let remainingTime;
 let gameOver = false;
+let gameEndReason = '';
+let decoyUsed = false;
 
 // EW değişkenleri
 let ewSource = null;
@@ -182,6 +220,26 @@ let decoyGraphics = null;
 let decoyText = null;
 let decoyPreview = null;
 
+// Patrol D değişkenleri
+let patrolD = null;
+let patrolDActive = false;
+let patrolDWarningShown = false;
+
+// Helikopter değişkenleri
+let helicopter = null;
+let helicopterActive = false;
+let helicopterCountdown = 0;
+let helicopterTriggered = false;
+let helicopterTakenOff = false;
+
+// Multi-Threat Panel değişkenleri
+let threatPanel = null;
+let threatPanelGraphics = null;
+
+// Ses sistemi değişkenleri
+let audioContext = null;
+let soundEnabled = true;
+
 // UI elementleri
 let droneCountText, detectionCountText, timerText, messageText;
 
@@ -193,19 +251,24 @@ class GameScene extends Phaser.Scene {
 
     create() {
         this.resetGameState();
+        this.initSoundSystem();
         this.createBackground();
         this.createDrones();
         this.createEnemies();
+        this.createPatrolD();
         this.createEWSource();
         this.createRFSignalSystem();
         this.createCounterVisionSystem();
         this.createDecoySystem();
+        this.createHelicopterSystem();
         this.createFogOfWar();
         this.createEWBorderEffect();
+        this.createMultiThreatPanel();
         this.createUI();
         this.setupInput();
         this.startTimer();
         this.scheduleEWActivation();
+        this.schedulePatrolDActivation();
     }
 
     resetGameState() {
@@ -215,6 +278,8 @@ class GameScene extends Phaser.Scene {
         exploredAreas = [];
         detectedEnemies = new Set();
         gameOver = false;
+        gameEndReason = '';
+        decoyUsed = false;
         remainingTime = CONFIG.game.duration;
         ewActive = false;
         ewDestroyed = false;
@@ -250,20 +315,34 @@ class GameScene extends Phaser.Scene {
         decoyGraphics = null;
         decoyText = null;
         decoyPreview = null;
+        // Patrol D
+        patrolD = null;
+        patrolDActive = false;
+        patrolDWarningShown = false;
+        // Helikopter
+        helicopter = null;
+        helicopterActive = false;
+        helicopterCountdown = 0;
+        helicopterTriggered = false;
+        helicopterTakenOff = false;
+        // Multi-Threat Panel
+        threatPanel = null;
+        threatPanelGraphics = null;
     }
 
     createBackground() {
         const graphics = this.add.graphics();
         graphics.lineStyle(1, 0x2a4f2a, 0.3);
 
-        for (let x = 0; x <= CONFIG.width; x += 50) {
+        // Oyun alanı grid (panel hariç)
+        for (let x = 0; x <= CONFIG.gameWidth; x += 50) {
             graphics.moveTo(x, 0);
             graphics.lineTo(x, CONFIG.height);
         }
 
         for (let y = 0; y <= CONFIG.height; y += 50) {
             graphics.moveTo(0, y);
-            graphics.lineTo(CONFIG.width, y);
+            graphics.lineTo(CONFIG.gameWidth, y);
         }
 
         graphics.strokePath();
@@ -271,7 +350,7 @@ class GameScene extends Phaser.Scene {
         // RF tespit bölgesi çizgisi
         graphics.lineStyle(2, 0x00ff00, 0.2);
         graphics.moveTo(0, CONFIG.rf.detectionZoneY);
-        graphics.lineTo(CONFIG.width, CONFIG.rf.detectionZoneY);
+        graphics.lineTo(CONFIG.gameWidth, CONFIG.rf.detectionZoneY);
         graphics.strokePath();
 
         const rfZoneLabel = this.add.text(10, CONFIG.rf.detectionZoneY - 25, '▲ RF TESPİT BÖLGESİ', {
@@ -281,6 +360,136 @@ class GameScene extends Phaser.Scene {
             alpha: 0.5
         });
         rfZoneLabel.setAlpha(0.4);
+
+        // Güvenli bölge çizgisi (helikopter için)
+        graphics.lineStyle(2, 0x00ffff, 0.15);
+        graphics.moveTo(0, CONFIG.helicopter.safeZoneY);
+        graphics.lineTo(CONFIG.gameWidth, CONFIG.helicopter.safeZoneY);
+        graphics.strokePath();
+
+        const safeZoneLabel = this.add.text(10, CONFIG.helicopter.safeZoneY + 5, '▼ GÜVENLİ BÖLGE', {
+            fontFamily: 'Arial',
+            fontSize: '12px',
+            color: '#00ffff',
+            alpha: 0.5
+        });
+        safeZoneLabel.setAlpha(0.3);
+
+        // Panel ayırıcı çizgi
+        graphics.lineStyle(3, 0x444444, 1);
+        graphics.moveTo(CONFIG.gameWidth, 0);
+        graphics.lineTo(CONFIG.gameWidth, CONFIG.height);
+        graphics.strokePath();
+    }
+
+    // === SES SİSTEMİ ===
+    initSoundSystem() {
+        try {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        } catch (e) {
+            console.log('Web Audio API desteklenmiyor');
+            soundEnabled = false;
+        }
+    }
+
+    playSound(type) {
+        if (!soundEnabled || !audioContext) return;
+
+        const oscillator = audioContext.createOscillator();
+        const gainNode = audioContext.createGain();
+        oscillator.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+
+        switch (type) {
+            case 'detect': // Yüksek bip - tespit
+                oscillator.frequency.value = 880;
+                oscillator.type = 'sine';
+                gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
+                oscillator.start();
+                oscillator.stop(audioContext.currentTime + 0.2);
+                break;
+
+            case 'warning': // Çift bip - uyarı
+                oscillator.frequency.value = 660;
+                oscillator.type = 'square';
+                gainNode.gain.setValueAtTime(0.2, audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.1);
+                oscillator.start();
+                oscillator.stop(audioContext.currentTime + 0.1);
+                // İkinci bip
+                setTimeout(() => {
+                    if (!audioContext) return;
+                    const osc2 = audioContext.createOscillator();
+                    const gain2 = audioContext.createGain();
+                    osc2.connect(gain2);
+                    gain2.connect(audioContext.destination);
+                    osc2.frequency.value = 660;
+                    osc2.type = 'square';
+                    gain2.gain.setValueAtTime(0.2, audioContext.currentTime);
+                    gain2.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.1);
+                    osc2.start();
+                    osc2.stop(audioContext.currentTime + 0.1);
+                }, 150);
+                break;
+
+            case 'threat': // Düşük alarm - tehdit
+                oscillator.frequency.value = 220;
+                oscillator.type = 'sawtooth';
+                gainNode.gain.setValueAtTime(0.25, audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+                oscillator.start();
+                oscillator.stop(audioContext.currentTime + 0.5);
+                break;
+
+            case 'win': // Melodi - kazanma (do-mi-sol)
+                const notes = [523.25, 659.25, 783.99]; // C5, E5, G5
+                notes.forEach((freq, i) => {
+                    setTimeout(() => {
+                        if (!audioContext) return;
+                        const osc = audioContext.createOscillator();
+                        const gain = audioContext.createGain();
+                        osc.connect(gain);
+                        gain.connect(audioContext.destination);
+                        osc.frequency.value = freq;
+                        osc.type = 'sine';
+                        gain.gain.setValueAtTime(0.3, audioContext.currentTime);
+                        gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
+                        osc.start();
+                        osc.stop(audioContext.currentTime + 0.3);
+                    }, i * 200);
+                });
+                break;
+
+            case 'lose': // Düşen ton - kaybetme
+                oscillator.frequency.setValueAtTime(440, audioContext.currentTime);
+                oscillator.frequency.exponentialRampToValueAtTime(110, audioContext.currentTime + 0.8);
+                oscillator.type = 'sawtooth';
+                gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.8);
+                oscillator.start();
+                oscillator.stop(audioContext.currentTime + 0.8);
+                break;
+
+            case 'artillery': // Patlama sesi
+                oscillator.frequency.setValueAtTime(100, audioContext.currentTime);
+                oscillator.frequency.exponentialRampToValueAtTime(30, audioContext.currentTime + 0.3);
+                oscillator.type = 'sawtooth';
+                gainNode.gain.setValueAtTime(0.4, audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
+                oscillator.start();
+                oscillator.stop(audioContext.currentTime + 0.3);
+                break;
+
+            case 'helicopter': // Helikopter sesi
+                oscillator.frequency.value = 80;
+                oscillator.type = 'square';
+                gainNode.gain.setValueAtTime(0.15, audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.4);
+                oscillator.start();
+                oscillator.stop(audioContext.currentTime + 0.4);
+                break;
+        }
     }
 
     // === COUNTER-VISION SİSTEMİ ===
@@ -453,6 +662,7 @@ class GameScene extends Phaser.Scene {
 
         decoyCount--;
         decoyMode = false;
+        decoyUsed = true;
         decoyPreview.setVisible(false);
 
         // Decoy oluştur
@@ -543,6 +753,512 @@ class GameScene extends Phaser.Scene {
             decoyGraphics.lineStyle(2, 0x4488ff, alpha);
             decoyGraphics.strokeCircle(decoyPlaced.x, decoyPlaced.y, radius);
         }
+    }
+
+    // === PATROL D SİSTEMİ ===
+    createPatrolD() {
+        // Kırmızı üçgen - büyük devriye
+        const cfg = CONFIG.enemy.patrolD;
+        const graphics = this.add.graphics();
+        graphics.fillStyle(cfg.color, 1);
+        graphics.beginPath();
+        graphics.moveTo(0, -cfg.size);
+        graphics.lineTo(-cfg.size * 0.8, cfg.size * 0.8);
+        graphics.lineTo(cfg.size * 0.8, cfg.size * 0.8);
+        graphics.closePath();
+        graphics.fillPath();
+        graphics.lineStyle(2, 0xffffff, 0.8);
+        graphics.strokePath();
+        graphics.generateTexture('patrolD_tex', cfg.size * 2, cfg.size * 2);
+        graphics.destroy();
+
+        patrolD = this.add.sprite(cfg.startX, cfg.startY, 'patrolD_tex');
+        patrolD.setOrigin(0.5, 0.5);
+        patrolD.setVisible(false);
+        patrolD.setDepth(55);
+
+        // Görüş konisi
+        patrolD.visionCone = this.add.graphics();
+        patrolD.visionCone.setDepth(54);
+
+        patrolD.data = {
+            targetX: cfg.targetX,
+            targetY: cfg.targetY,
+            speed: cfg.speed,
+            facingAngle: 0,
+            isRevealed: false
+        };
+    }
+
+    schedulePatrolDActivation() {
+        this.time.delayedCall(CONFIG.enemy.patrolD.activationTime * 1000, () => {
+            if (gameOver) return;
+            this.activatePatrolD();
+        });
+    }
+
+    activatePatrolD() {
+        patrolDActive = true;
+        this.showMessage('🚨 YENİ DÜŞMAN TESPİT EDİLDİ! (PATROL D)', 3000);
+        this.playSound('threat');
+    }
+
+    updatePatrolD(delta) {
+        if (!patrolDActive || !patrolD || gameOver) return;
+
+        const cfg = CONFIG.enemy.patrolD;
+        const speed = cfg.speed * (delta / 1000);
+
+        // Hedef: Oyuncu başlangıç bölgesi
+        const dx = cfg.targetX - patrolD.x;
+        const dy = cfg.targetY - patrolD.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist > 5) {
+            patrolD.x += (dx / dist) * speed;
+            patrolD.y += (dy / dist) * speed;
+            patrolD.data.facingAngle = Phaser.Math.RadToDeg(Math.atan2(dy, dx));
+            patrolD.rotation = Math.atan2(dy, dx) + Math.PI / 2;
+        }
+
+        // Oyuncuya yaklaşım kontrolü
+        this.checkPatrolDProximity();
+        // Görüş konisi ile drone tespiti
+        this.checkPatrolDVision();
+    }
+
+    checkPatrolDProximity() {
+        const cfg = CONFIG.enemy.patrolD;
+        let closestDist = Infinity;
+
+        drones.forEach(drone => {
+            if (!drone.droneData.isAlive) return;
+            const dist = Phaser.Math.Distance.Between(patrolD.x, patrolD.y, drone.x, drone.y);
+            if (dist < closestDist) closestDist = dist;
+        });
+
+        // Uyarı mesafesi
+        if (closestDist <= cfg.warningDistance && !patrolDWarningShown) {
+            patrolDWarningShown = true;
+            this.showMessage('🚨 DÜŞMAN YAKLAŞIYOR!', 2000);
+            this.playSound('warning');
+        }
+
+        // Tehlike mesafesi
+        if (closestDist <= cfg.dangerDistance) {
+            this.endGame(false, 'Patrol D drone\'ları yakaladı!');
+        }
+    }
+
+    checkPatrolDVision() {
+        const cfg = CONFIG.enemy.patrolD;
+        const halfAngle = cfg.visionAngle / 2;
+
+        drones.forEach(drone => {
+            if (!drone.droneData.isAlive) return;
+
+            const dist = Phaser.Math.Distance.Between(patrolD.x, patrolD.y, drone.x, drone.y);
+            if (dist > cfg.visionRange) return;
+
+            const angleToDrone = Phaser.Math.RadToDeg(Math.atan2(drone.y - patrolD.y, drone.x - patrolD.x));
+            let angleDiff = angleToDrone - patrolD.data.facingAngle;
+
+            while (angleDiff > 180) angleDiff -= 360;
+            while (angleDiff < -180) angleDiff += 360;
+
+            if (Math.abs(angleDiff) <= halfAngle) {
+                this.droneDetected(drone);
+            }
+        });
+    }
+
+    drawPatrolDVisionCone() {
+        if (!patrolD || !patrolD.visionCone || !patrolDActive) return;
+
+        patrolD.visionCone.clear();
+
+        // Görünürlük kontrolü
+        let isVisible = false;
+        drones.forEach(drone => {
+            if (!drone.droneData.isAlive) return;
+            const dist = Phaser.Math.Distance.Between(drone.x, drone.y, patrolD.x, patrolD.y);
+            if (dist <= drone.droneData.currentVisionRadius) {
+                isVisible = true;
+                if (!patrolD.data.isRevealed) {
+                    patrolD.data.isRevealed = true;
+                    this.showMessage('⚠️ HEDEF TESPİT EDİLDİ: PATROL D ⚠️');
+                    this.playSound('detect');
+                }
+            }
+        });
+
+        patrolD.setVisible(isVisible || patrolD.data.isRevealed);
+        patrolD.setAlpha(isVisible ? 1 : 0.5);
+
+        if (!isVisible && !patrolD.data.isRevealed) return;
+
+        const cfg = CONFIG.enemy.patrolD;
+        const angle = patrolD.data.facingAngle;
+        const halfAngle = cfg.visionAngle / 2;
+        const range = cfg.visionRange;
+
+        patrolD.visionCone.fillStyle(0xff0000, 0.4);
+        patrolD.visionCone.beginPath();
+        patrolD.visionCone.moveTo(patrolD.x, patrolD.y);
+
+        const startAngle = Phaser.Math.DegToRad(angle - halfAngle);
+        const endAngle = Phaser.Math.DegToRad(angle + halfAngle);
+
+        const segments = 20;
+        for (let i = 0; i <= segments; i++) {
+            const a = startAngle + (endAngle - startAngle) * (i / segments);
+            const x = patrolD.x + Math.cos(a) * range;
+            const y = patrolD.y + Math.sin(a) * range;
+            patrolD.visionCone.lineTo(x, y);
+        }
+
+        patrolD.visionCone.closePath();
+        patrolD.visionCone.fillPath();
+    }
+
+    // === HELİKOPTER SİSTEMİ ===
+    createHelicopterSystem() {
+        const cfg = CONFIG.helicopter;
+
+        // Mi-8 helikopter görsel
+        helicopter = this.add.graphics();
+        helicopter.setDepth(200);
+        helicopter.setVisible(false);
+        helicopter.setPosition(cfg.x, cfg.y);
+
+        // Helikopter şekli çiz
+        this.drawHelicopterShape();
+
+        // Helikopter label
+        helicopter.label = this.add.text(cfg.x, cfg.y + 40, '', {
+            fontFamily: 'Arial Black',
+            fontSize: '16px',
+            color: '#ff0000',
+            stroke: '#000000',
+            strokeThickness: 3
+        });
+        helicopter.label.setOrigin(0.5, 0.5);
+        helicopter.label.setDepth(201);
+        helicopter.label.setVisible(false);
+    }
+
+    drawHelicopterShape() {
+        helicopter.clear();
+
+        // Gövde
+        helicopter.fillStyle(0x444444, 1);
+        helicopter.fillEllipse(0, 0, 50, 20);
+
+        // Kuyruk
+        helicopter.fillStyle(0x333333, 1);
+        helicopter.fillRect(-40, -5, 30, 10);
+
+        // Rotor
+        const rotorAngle = (this.time.now / 50) % 360;
+        helicopter.lineStyle(3, 0x666666, 1);
+        helicopter.beginPath();
+        helicopter.moveTo(-35 * Math.cos(Phaser.Math.DegToRad(rotorAngle)), -35 * Math.sin(Phaser.Math.DegToRad(rotorAngle)));
+        helicopter.lineTo(35 * Math.cos(Phaser.Math.DegToRad(rotorAngle)), 35 * Math.sin(Phaser.Math.DegToRad(rotorAngle)));
+        helicopter.strokePath();
+        helicopter.beginPath();
+        helicopter.moveTo(-35 * Math.cos(Phaser.Math.DegToRad(rotorAngle + 90)), -35 * Math.sin(Phaser.Math.DegToRad(rotorAngle + 90)));
+        helicopter.lineTo(35 * Math.cos(Phaser.Math.DegToRad(rotorAngle + 90)), 35 * Math.sin(Phaser.Math.DegToRad(rotorAngle + 90)));
+        helicopter.strokePath();
+
+        // Rotor merkezi
+        helicopter.fillStyle(0x888888, 1);
+        helicopter.fillCircle(0, -2, 8);
+    }
+
+    checkHelicopterTrigger() {
+        if (helicopterTriggered || gameOver) return;
+
+        // Tetikleme koşulları:
+        // 1. 3 düşman tespit edildi
+        // 2. EW yok edildi
+        // 3. Kalan süre < 60 saniye
+        const allEnemiesDetected = detectedEnemies.size >= 3;
+        const timeCondition = remainingTime <= CONFIG.helicopter.triggerTimeRemaining;
+
+        if (allEnemiesDetected && ewDestroyed && timeCondition) {
+            this.triggerHelicopter();
+        }
+    }
+
+    triggerHelicopter() {
+        helicopterTriggered = true;
+        helicopterActive = true;
+        helicopterCountdown = CONFIG.helicopter.countdownDuration;
+
+        helicopter.setVisible(true);
+        helicopter.label.setVisible(true);
+
+        this.showMessage('⚠️ HELİKOPTER KALKIYOR! Güneye kaçın!', 4000);
+        this.playSound('helicopter');
+
+        // Yanıp sönme efekti
+        this.tweens.add({
+            targets: helicopter,
+            alpha: { from: 1, to: 0.5 },
+            duration: 300,
+            yoyo: true,
+            repeat: -1
+        });
+
+        // Geri sayım
+        this.helicopterTimer = this.time.addEvent({
+            delay: 1000,
+            callback: () => {
+                if (gameOver) return;
+
+                helicopterCountdown--;
+                helicopter.label.setText(`⏱️ ${helicopterCountdown}sn`);
+                this.playSound('warning');
+
+                if (helicopterCountdown <= 0) {
+                    this.helicopterTakeOff();
+                }
+            },
+            repeat: CONFIG.helicopter.countdownDuration - 1
+        });
+    }
+
+    helicopterTakeOff() {
+        helicopterTakenOff = true;
+        this.playSound('helicopter');
+
+        // Drone'ların güvenli bölgede olup olmadığını kontrol et
+        const allSafe = drones.every(drone => {
+            if (!drone.droneData.isAlive) return true; // Ölü drone'lar sayılmaz
+            return drone.y > CONFIG.helicopter.safeZoneY;
+        });
+
+        const aliveDrones = drones.filter(d => d.droneData.isAlive);
+
+        if (allSafe && aliveDrones.length > 0) {
+            // Kazandı - drone'lar güvende
+            this.endGame(true, 'Drone\'lar güvende! Misyon tamamlandı!');
+        } else {
+            // Kaybetti - helikopter drone'ları tespit etti
+            this.endGame(false, 'Helikopter drone\'ları avladı!');
+        }
+    }
+
+    updateHelicopter() {
+        if (!helicopterActive || !helicopter.visible) return;
+
+        // Rotor animasyonu
+        this.drawHelicopterShape();
+    }
+
+    // === MULTİ-THREAT PANEL ===
+    createMultiThreatPanel() {
+        const panelX = CONFIG.gameWidth + 10;
+        const panelWidth = CONFIG.panelWidth - 20;
+
+        // Panel arka planı
+        threatPanelGraphics = this.add.graphics();
+        threatPanelGraphics.setDepth(250);
+
+        // Panel başlığı
+        const titleText = this.add.text(panelX + panelWidth / 2, 20, '⚠️ AKTİF TEHDİTLER', {
+            fontFamily: 'Arial Black',
+            fontSize: '14px',
+            color: '#ff6600',
+            stroke: '#000000',
+            strokeThickness: 2
+        });
+        titleText.setOrigin(0.5, 0);
+        titleText.setDepth(251);
+
+        // Panel elementi
+        threatPanel = {
+            graphics: threatPanelGraphics,
+            x: panelX,
+            width: panelWidth,
+            items: []
+        };
+    }
+
+    updateMultiThreatPanel() {
+        if (!threatPanelGraphics) return;
+
+        threatPanelGraphics.clear();
+
+        const panelX = CONFIG.gameWidth + 10;
+        const panelWidth = CONFIG.panelWidth - 20;
+        const startY = 50;
+        const itemHeight = 90;
+
+        // Panel arka plan
+        threatPanelGraphics.fillStyle(0x1a1a1a, 0.9);
+        threatPanelGraphics.fillRoundedRect(panelX - 5, 5, panelWidth + 10, CONFIG.height - 10, 8);
+
+        // Çerçeve
+        threatPanelGraphics.lineStyle(2, 0x444444, 1);
+        threatPanelGraphics.strokeRoundedRect(panelX - 5, 5, panelWidth + 10, CONFIG.height - 10, 8);
+
+        // 1. EW SİSTEMİ
+        this.drawThreatItem(panelX, startY, panelWidth, {
+            title: '1. EW SİSTEMİ',
+            status: ewDestroyed ? 'solved' : (ewActive ? 'active' : 'pending'),
+            progress: ewDestroyed ? 100 : (rfLocalized ? 80 : (ewActive ? 50 : 0)),
+            detail: ewDestroyed ? '✓ Yok edildi' : (rfLocalized ? 'Lokalize edildi!' : (ewActive ? 'Aktif - Triangüle et' : `Aktivasyon: ${Math.max(0, CONFIG.ew.activationTime - (CONFIG.game.duration - remainingTime))}sn`)),
+            solution: ewDestroyed ? '' : 'Çözüm: Triangüle'
+        });
+
+        // 2. COUNTER-VİSİON
+        this.drawThreatItem(panelX, startY + itemHeight, panelWidth, {
+            title: '2. COUNTER-VİSİON',
+            status: counterVisionReachedEnd ? 'failed' : (counterVisionActive ? 'active' : 'pending'),
+            progress: counterVisionActive ? Math.floor(((counterVisionY - CONFIG.counterVision.startY) / (CONFIG.counterVision.endY - CONFIG.counterVision.startY)) * 100) : 0,
+            detail: counterVisionReachedEnd ? `💀 Topçu: ${enemyArtilleryCountdown}sn` : (counterVisionPaused ? `Duraklatıldı: ${Math.ceil(counterVisionPauseTime / 1000)}sn` : (counterVisionActive ? `Tarama: %${Math.floor(((counterVisionY - CONFIG.counterVision.startY) / (CONFIG.counterVision.endY - CONFIG.counterVision.startY)) * 100)}` : `Aktivasyon: ${Math.max(0, CONFIG.counterVision.activationTime - (CONFIG.game.duration - remainingTime))}sn`)),
+            solution: counterVisionActive ? 'Çözüm: Decoy/Kaç' : ''
+        });
+
+        // 3. PATROL D
+        this.drawThreatItem(panelX, startY + itemHeight * 2, panelWidth, {
+            title: '3. PATROL D',
+            status: patrolDActive ? 'active' : 'pending',
+            progress: patrolDActive ? 100 : 0,
+            detail: patrolDActive ? (patrolDWarningShown ? '🚨 YAKLAŞIYOR!' : 'Aktif - Dikkat!') : `Aktivasyon: ${Math.max(0, CONFIG.enemy.patrolD.activationTime - (CONFIG.game.duration - remainingTime))}sn`,
+            solution: patrolDActive ? 'Çözüm: Uzak dur!' : ''
+        });
+
+        // 4. HELİKOPTER
+        this.drawThreatItem(panelX, startY + itemHeight * 3, panelWidth, {
+            title: '4. HELİKOPTER',
+            status: helicopterTakenOff ? 'failed' : (helicopterActive ? 'active' : 'pending'),
+            progress: helicopterActive ? Math.floor(((CONFIG.helicopter.countdownDuration - helicopterCountdown) / CONFIG.helicopter.countdownDuration) * 100) : 0,
+            detail: helicopterTakenOff ? '💀 Havalandı!' : (helicopterActive ? `⏱️ Kalkış: ${helicopterCountdown}sn` : 'Bekleniyor...'),
+            solution: helicopterActive ? 'Çözüm: Y>500 git!' : ''
+        });
+
+        // 5. ZAMAN
+        this.drawThreatItem(panelX, startY + itemHeight * 4, panelWidth, {
+            title: '5. ZAMAN',
+            status: remainingTime <= 30 ? 'active' : (remainingTime <= 60 ? 'warning' : 'pending'),
+            progress: Math.floor(((CONFIG.game.duration - remainingTime) / CONFIG.game.duration) * 100),
+            detail: `⏱️ ${Math.floor(remainingTime / 60).toString().padStart(2, '0')}:${(remainingTime % 60).toString().padStart(2, '0')}`,
+            solution: remainingTime <= 60 ? 'Çözüm: Hızlan!' : ''
+        });
+
+        // 6. DECOY DURUMU
+        this.drawThreatItem(panelX, startY + itemHeight * 5, panelWidth, {
+            title: '📡 DECOY',
+            status: decoyActive ? 'active' : (decoyCount > 0 ? 'ready' : 'used'),
+            progress: decoyActive ? Math.floor((decoyTimer / CONFIG.decoy.duration) * 100) : (decoyCount > 0 ? 100 : 0),
+            detail: decoyActive ? `Aktif: ${decoyTimer}sn` : (decoyCount > 0 ? '1 adet hazır [D]' : 'Kullanıldı'),
+            solution: ''
+        });
+
+        // Görev özeti
+        this.drawMissionSummary(panelX, startY + itemHeight * 6 + 20, panelWidth);
+    }
+
+    drawThreatItem(x, y, width, data) {
+        const colors = {
+            active: 0xff3333,
+            solved: 0x00ff00,
+            failed: 0x333333,
+            pending: 0x888888,
+            warning: 0xffaa00,
+            ready: 0x00ffff,
+            used: 0x666666
+        };
+
+        const color = colors[data.status] || colors.pending;
+
+        // Arka plan
+        threatPanelGraphics.fillStyle(0x222222, 0.8);
+        threatPanelGraphics.fillRoundedRect(x, y, width, 80, 5);
+
+        // Sol kenar rengi
+        threatPanelGraphics.fillStyle(color, 1);
+        threatPanelGraphics.fillRect(x, y, 4, 80);
+
+        // Başlık
+        const titleStyle = {
+            fontFamily: 'Arial',
+            fontSize: '12px',
+            color: data.status === 'failed' ? '#666666' : '#ffffff',
+            stroke: '#000000',
+            strokeThickness: 1
+        };
+
+        // Başlık metni (bir kere oluştur ve güncelle)
+        if (!this[`threat_title_${y}`]) {
+            this[`threat_title_${y}`] = this.add.text(x + 10, y + 8, data.title, titleStyle);
+            this[`threat_title_${y}`].setDepth(252);
+        }
+        this[`threat_title_${y}`].setText(data.title);
+        if (data.status === 'failed') {
+            this[`threat_title_${y}`].setStyle({ ...titleStyle, color: '#666666' });
+        }
+
+        // Progress bar
+        const barWidth = width - 20;
+        const barHeight = 12;
+        const barY = y + 30;
+
+        threatPanelGraphics.fillStyle(0x333333, 1);
+        threatPanelGraphics.fillRect(x + 10, barY, barWidth, barHeight);
+
+        const progressWidth = (data.progress / 100) * barWidth;
+        threatPanelGraphics.fillStyle(color, 0.8);
+        threatPanelGraphics.fillRect(x + 10, barY, progressWidth, barHeight);
+
+        // Detay metni
+        if (!this[`threat_detail_${y}`]) {
+            this[`threat_detail_${y}`] = this.add.text(x + 10, y + 48, '', {
+                fontFamily: 'Arial',
+                fontSize: '11px',
+                color: '#cccccc'
+            });
+            this[`threat_detail_${y}`].setDepth(252);
+        }
+        this[`threat_detail_${y}`].setText(data.detail);
+
+        // Çözüm metni
+        if (!this[`threat_solution_${y}`]) {
+            this[`threat_solution_${y}`] = this.add.text(x + 10, y + 62, '', {
+                fontFamily: 'Arial',
+                fontSize: '10px',
+                color: '#ffff00'
+            });
+            this[`threat_solution_${y}`].setDepth(252);
+        }
+        this[`threat_solution_${y}`].setText(data.solution);
+    }
+
+    drawMissionSummary(x, y, width) {
+        // Misyon özeti kutusu
+        threatPanelGraphics.fillStyle(0x1a2f1a, 0.9);
+        threatPanelGraphics.fillRoundedRect(x, y, width, 70, 5);
+        threatPanelGraphics.lineStyle(1, 0x00ff00, 0.5);
+        threatPanelGraphics.strokeRoundedRect(x, y, width, 70, 5);
+
+        if (!this.missionSummaryText) {
+            this.missionSummaryText = this.add.text(x + 10, y + 10, '', {
+                fontFamily: 'Arial',
+                fontSize: '11px',
+                color: '#00ff00',
+                lineSpacing: 5
+            });
+            this.missionSummaryText.setDepth(252);
+        }
+
+        const aliveDrones = drones.filter(d => d.droneData.isAlive).length;
+        this.missionSummaryText.setText(
+            `🎯 HEDEF: ${detectedEnemies.size}/3\n` +
+            `🛸 DRONE: ${aliveDrones}/${CONFIG.drone.count}\n` +
+            `⚡ EW: ${ewDestroyed ? 'YOK' : (ewActive ? 'AKTİF' : 'BEKLİYOR')}`
+        );
     }
 
     // === RF SİNYAL SİSTEMİ ===
@@ -886,6 +1602,7 @@ class GameScene extends Phaser.Scene {
     }
 
     executeArtilleryStrike(point) {
+        this.playSound('artillery');
         const explosion = this.add.circle(point.x, point.y, 10, 0xff6600, 1);
         explosion.setDepth(202);
 
@@ -1550,11 +2267,20 @@ class GameScene extends Phaser.Scene {
         // Decoy
         this.drawDecoy();
 
+        // Patrol D
+        this.updatePatrolD(delta);
+        this.drawPatrolDVisionCone();
+
+        // Helikopter
+        this.checkHelicopterTrigger();
+        this.updateHelicopter();
+
         this.checkVisibility();
         this.renderFogOfWar();
         this.drawPatrolVisionCone();
         this.checkPatrolDetection();
         this.updateUI();
+        this.updateMultiThreatPanel();
         this.checkWinCondition();
     }
 
@@ -1655,6 +2381,7 @@ class GameScene extends Phaser.Scene {
                         enemy.enemyData.isRevealed = true;
                         detectedEnemies.add(enemy);
                         this.showMessage(`⚠️ HEDEF TESPİT EDİLDİ: ${enemy.enemyData.name} ⚠️`);
+                        this.playSound('detect');
                     }
                 }
             });
@@ -1738,64 +2465,250 @@ class GameScene extends Phaser.Scene {
 
     endGame(won, reason) {
         gameOver = true;
+        gameEndReason = reason;
 
         if (gameTimer) gameTimer.remove();
         if (ewPulseTween) ewPulseTween.stop();
+        if (this.helicopterTimer) this.helicopterTimer.remove();
 
-        const overlay = this.add.rectangle(CONFIG.width / 2, CONFIG.height / 2, CONFIG.width, CONFIG.height, 0x000000, 0.8);
+        // Ses efekti
+        this.playSound(won ? 'win' : 'lose');
+
+        // Overlay
+        const overlay = this.add.rectangle(CONFIG.width / 2, CONFIG.height / 2, CONFIG.width, CONFIG.height, 0x000000, 0.85);
         overlay.setDepth(300);
 
-        const resultStyle = {
-            fontFamily: 'Arial Black, sans-serif',
-            fontSize: '48px',
-            color: won ? '#00ff00' : '#ff0000',
-            stroke: '#000000',
-            strokeThickness: 6,
-            align: 'center'
-        };
+        // Panel arka planı
+        const panelWidth = 500;
+        const panelHeight = won ? 450 : 350;
+        const panelX = CONFIG.width / 2 - panelWidth / 2;
+        const panelY = CONFIG.height / 2 - panelHeight / 2;
 
-        const title = won ? '🏆 MİSYON TAMAMLANDI 🏆' : '💀 MİSYON BAŞARISIZ 💀';
-        const resultText = this.add.text(CONFIG.width / 2, CONFIG.height / 2 - 50, title, resultStyle);
-        resultText.setOrigin(0.5);
-        resultText.setDepth(301);
+        const panelBg = this.add.graphics();
+        panelBg.setDepth(301);
+        panelBg.fillStyle(0x1a1a1a, 0.95);
+        panelBg.fillRoundedRect(panelX, panelY, panelWidth, panelHeight, 15);
+        panelBg.lineStyle(3, won ? 0x00ff00 : 0xff0000, 1);
+        panelBg.strokeRoundedRect(panelX, panelY, panelWidth, panelHeight, 15);
 
-        const reasonText = this.add.text(CONFIG.width / 2, CONFIG.height / 2 + 30, reason, {
-            fontFamily: 'Arial, sans-serif',
-            fontSize: '24px',
-            color: '#ffffff',
-            stroke: '#000000',
+        if (won) {
+            this.showWinScreen(panelX, panelY, panelWidth);
+        } else {
+            this.showLoseScreen(panelX, panelY, panelWidth, reason);
+        }
+    }
+
+    showWinScreen(panelX, panelY, panelWidth) {
+        const centerX = panelX + panelWidth / 2;
+
+        // Başlık
+        const title = this.add.text(centerX, panelY + 30, '★ MİSYON TAMAMLANDI ★', {
+            fontFamily: 'Arial Black',
+            fontSize: '28px',
+            color: '#00ff00',
+            stroke: '#003300',
             strokeThickness: 3
         });
-        reasonText.setOrigin(0.5);
-        reasonText.setDepth(301);
+        title.setOrigin(0.5, 0);
+        title.setDepth(302);
 
-        const ewStatus = ewDestroyed ? 'YOK EDİLDİ' : (ewActive ? 'AKTİF' : 'PASİF');
-        const stats = `Tespit: ${detectedEnemies.size}/3 | Drone: ${drones.filter(d => d.droneData.isAlive).length}/${CONFIG.drone.count} | EW: ${ewStatus}`;
-        const statsText = this.add.text(CONFIG.width / 2, CONFIG.height / 2 + 100, stats, {
-            fontFamily: 'Arial, sans-serif',
-            fontSize: '20px',
-            color: '#aaaaaa',
-            stroke: '#000000',
-            strokeThickness: 2,
-            align: 'center'
+        // İstatistikler
+        const aliveDrones = drones.filter(d => d.droneData.isAlive).length;
+        const elapsedTime = CONFIG.game.duration - remainingTime;
+        const minutes = Math.floor(elapsedTime / 60);
+        const seconds = elapsedTime % 60;
+
+        const statsY = panelY + 80;
+        const statsStyle = { fontFamily: 'Arial', fontSize: '16px', color: '#ffffff', lineSpacing: 8 };
+
+        const statsText = this.add.text(panelX + 30, statsY,
+            `Tespit edilen düşman: ${detectedEnemies.size}/3\n` +
+            `Kalan drone: ${aliveDrones}/${CONFIG.drone.count}\n` +
+            `EW yok edildi: ${ewDestroyed ? '✓' : '✗'}\n` +
+            `Decoy kullanıldı: ${decoyUsed ? '✓' : '✗'}\n` +
+            `Süre: ${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`,
+            statsStyle
+        );
+        statsText.setDepth(302);
+
+        // Maliyet analizi başlığı
+        const costTitleY = statsY + 130;
+        const costTitle = this.add.text(centerX, costTitleY, '💰 MALİYET ANALİZİ', {
+            fontFamily: 'Arial Black',
+            fontSize: '18px',
+            color: '#ffcc00'
         });
-        statsText.setOrigin(0.5);
-        statsText.setDepth(301);
+        costTitle.setOrigin(0.5, 0);
+        costTitle.setDepth(302);
 
-        const restartText = this.add.text(CONFIG.width / 2, CONFIG.height / 2 + 160, '[ TIKLA - YENİDEN BAŞLA ]', {
-            fontFamily: 'Arial, sans-serif',
+        // Maliyet hesaplama
+        const dronesCost = CONFIG.drone.count * CONFIG.cost.droneUnitCost;
+        const decoyCost = decoyUsed ? CONFIG.cost.decoyUnitCost : 0;
+        const totalSpent = dronesCost + decoyCost;
+
+        // Tespit edilen değer hesaplama
+        let detectedValue = 0;
+        enemies.forEach(enemy => {
+            if (enemy.enemyData && enemy.enemyData.isRevealed) {
+                if (enemy.enemyData.type === 'tank') {
+                    detectedValue += CONFIG.cost.tankValue;
+                } else if (enemy.enemyData.type === 'patrol') {
+                    detectedValue += CONFIG.cost.patrolValue;
+                }
+            }
+        });
+        // Patrol D tespit edildiyse
+        if (patrolD && patrolD.data && patrolD.data.isRevealed) {
+            detectedValue += CONFIG.cost.patrolValue;
+        }
+        // EW yok edildiyse
+        if (ewDestroyed) {
+            detectedValue += CONFIG.cost.ewValue;
+        }
+
+        const roi = totalSpent > 0 ? Math.round(detectedValue / totalSpent) : 0;
+
+        const costY = costTitleY + 35;
+        const costText = this.add.text(panelX + 30, costY,
+            `Harcanan: $${totalSpent.toLocaleString()}\n` +
+            `Tespit edilen değer: $${detectedValue.toLocaleString()}\n` +
+            `ROI: ${roi.toLocaleString()}:1`,
+            { fontFamily: 'Arial', fontSize: '15px', color: '#aaffaa', lineSpacing: 6 }
+        );
+        costText.setDepth(302);
+
+        // Butonlar
+        const buttonY = panelY + 380;
+
+        // Yeniden Oyna butonu
+        const replayBtn = this.add.text(centerX - 100, buttonY, '[ YENİDEN OYNA ]', {
+            fontFamily: 'Arial',
+            fontSize: '18px',
+            color: '#ffff00',
+            stroke: '#000000',
+            strokeThickness: 2
+        });
+        replayBtn.setOrigin(0.5, 0);
+        replayBtn.setDepth(302);
+        replayBtn.setInteractive({ useHandCursor: true });
+        replayBtn.on('pointerover', () => replayBtn.setScale(1.1));
+        replayBtn.on('pointerout', () => replayBtn.setScale(1));
+        replayBtn.on('pointerdown', () => this.scene.restart());
+
+        // Bölüm 2 butonu
+        const nextBtn = this.add.text(centerX + 100, buttonY, '[ BÖLÜM 2 → ]', {
+            fontFamily: 'Arial',
+            fontSize: '18px',
+            color: '#00ffff',
+            stroke: '#000000',
+            strokeThickness: 2
+        });
+        nextBtn.setOrigin(0.5, 0);
+        nextBtn.setDepth(302);
+        nextBtn.setInteractive({ useHandCursor: true });
+        nextBtn.on('pointerover', () => nextBtn.setScale(1.1));
+        nextBtn.on('pointerout', () => nextBtn.setScale(1));
+        nextBtn.on('pointerdown', () => {
+            this.showMessage('Bölüm 2 yakında...', 2000);
+        });
+    }
+
+    showLoseScreen(panelX, panelY, panelWidth, reason) {
+        const centerX = panelX + panelWidth / 2;
+
+        // Başlık
+        const title = this.add.text(centerX, panelY + 30, '✗ MİSYON BAŞARISIZ ✗', {
+            fontFamily: 'Arial Black',
+            fontSize: '28px',
+            color: '#ff0000',
+            stroke: '#330000',
+            strokeThickness: 3
+        });
+        title.setOrigin(0.5, 0);
+        title.setDepth(302);
+
+        // Sebep
+        const reasonTitle = this.add.text(centerX, panelY + 80, 'Sebep:', {
+            fontFamily: 'Arial',
+            fontSize: '16px',
+            color: '#888888'
+        });
+        reasonTitle.setOrigin(0.5, 0);
+        reasonTitle.setDepth(302);
+
+        // Dinamik sebep metni
+        let reasonText = reason;
+        if (reason.includes('drone') || reason.includes('Drone')) {
+            reasonText = '💀 Tüm drone\'lar kaybedildi';
+        } else if (reason.includes('süre') || reason.includes('SÜRE')) {
+            reasonText = '⏱️ Süre doldu';
+        } else if (reason.includes('tespit') || reason.includes('TESPİT')) {
+            reasonText = '📡 Konum tespit edildi';
+        } else if (reason.includes('Helikopter') || reason.includes('helikopter')) {
+            reasonText = '🚁 Helikopter drone\'ları avladı';
+        } else if (reason.includes('Patrol D')) {
+            reasonText = '🎯 Patrol D drone\'ları yakaladı';
+        } else if (reason.includes('TOPÇU')) {
+            reasonText = '💥 Topçu atışı aldınız';
+        }
+
+        const reasonValue = this.add.text(centerX, panelY + 105, reasonText, {
+            fontFamily: 'Arial',
+            fontSize: '20px',
+            color: '#ff6666'
+        });
+        reasonValue.setOrigin(0.5, 0);
+        reasonValue.setDepth(302);
+
+        // İpucu başlığı
+        const hintTitle = this.add.text(centerX, panelY + 160, '💡 İPUCU:', {
+            fontFamily: 'Arial Black',
+            fontSize: '16px',
+            color: '#ffcc00'
+        });
+        hintTitle.setOrigin(0.5, 0);
+        hintTitle.setDepth(302);
+
+        // Dinamik ipucu
+        let hint = '';
+        if (reason.includes('drone') || reason.includes('Drone')) {
+            hint = 'Drone\'ları düşman görüş alanından uzak tutun.\nDevriye yollarını gözlemleyin.';
+        } else if (reason.includes('süre') || reason.includes('SÜRE')) {
+            hint = 'Daha hızlı hareket edin.\nBirden fazla drone ile paralel keşif yapın.';
+        } else if (reason.includes('Helikopter') || reason.includes('helikopter')) {
+            hint = 'Helikopter kalkmadan önce tüm drone\'ları\ngüvenli bölgeye (Y > 500) çekin.';
+        } else if (reason.includes('Patrol D')) {
+            hint = 'Patrol D\'den uzak durun (50px tehlikeli).\n90. saniyede doğudan gelir.';
+        } else if (reason.includes('TOPÇU') || reason.includes('tespit')) {
+            hint = 'Counter-Vision taramasını decoy ile oyalayın.\nVeya drone\'ları tarama çizgisinden kaçırın.';
+        } else {
+            hint = 'Dikkatli ilerleyin ve tehditleri takip edin.';
+        }
+
+        const hintText = this.add.text(centerX, panelY + 190, hint, {
+            fontFamily: 'Arial',
+            fontSize: '14px',
+            color: '#ffffaa',
+            align: 'center',
+            lineSpacing: 5
+        });
+        hintText.setOrigin(0.5, 0);
+        hintText.setDepth(302);
+
+        // Yeniden Dene butonu
+        const retryBtn = this.add.text(centerX, panelY + 280, '[ YENİDEN DENE ]', {
+            fontFamily: 'Arial',
             fontSize: '22px',
             color: '#ffff00',
             stroke: '#000000',
             strokeThickness: 3
         });
-        restartText.setOrigin(0.5);
-        restartText.setDepth(301);
-        restartText.setInteractive({ useHandCursor: true });
-
-        restartText.on('pointerover', () => restartText.setScale(1.1));
-        restartText.on('pointerout', () => restartText.setScale(1));
-        restartText.on('pointerdown', () => this.scene.restart());
+        retryBtn.setOrigin(0.5, 0);
+        retryBtn.setDepth(302);
+        retryBtn.setInteractive({ useHandCursor: true });
+        retryBtn.on('pointerover', () => retryBtn.setScale(1.1));
+        retryBtn.on('pointerout', () => retryBtn.setScale(1));
+        retryBtn.on('pointerdown', () => this.scene.restart());
     }
 }
 
